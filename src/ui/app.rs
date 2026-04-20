@@ -541,63 +541,102 @@ impl App {
                     .with_position(egui::pos2(r.x as f32, r.y as f32)),
                 move |ctx, class| {
                     if matches!(class, egui::ViewportClass::Embedded) {
-                        // fallback if transparency not supported, but usually is.
                         egui::CentralPanel::default().show(ctx, |ui| {
                             ui.label("Frame Viewer (Embedded)");
                         });
-                    } else {
-                        egui::CentralPanel::default()
-                            .frame(egui::Frame::NONE.fill(egui::Color32::TRANSPARENT))
-                            .show(ctx, |ui| {
-                                let (response, painter) = ui.allocate_painter(
-                                    ui.available_size(),
-                                    egui::Sense::click_and_drag(),
+                        return;
+                    }
+
+                    // Paint directly on the transparent GPU-cleared surface.
+                    // Deliberately avoids CentralPanel which always fills panel_fill
+                    // (white/dark) over the wgpu-transparent background.
+                    let full_rect = ctx.screen_rect();
+                    let painter = ctx.layer_painter(egui::LayerId::background());
+
+                    {
+                        let m = model_arc.lock();
+                        if slot_id < m.slots.len() {
+                            let slot = &m.slots[slot_id];
+                            let show_overlay = slot.overlay_mode && !slot.last_translation.is_empty();
+                            let show_border  = slot.show_frame;
+                            let text = slot.last_translation.clone();
+                            drop(m);
+
+                            // Overlay mode: solid dark background (NOT pure black — black is our
+                            // Win32 color key and would become transparent). Use dark navy instead.
+                            if show_overlay {
+                                painter.rect_filled(full_rect, 0.0, egui::Color32::from_rgb(15, 15, 30));
+
+                                let galley = ctx.fonts(|f| {
+                                    f.layout(
+                                        text,
+                                        egui::FontId::proportional(18.0),
+                                        egui::Color32::WHITE,
+                                        full_rect.width() - 16.0,
+                                    )
+                                });
+                                let text_pos = egui::pos2(
+                                    full_rect.center().x - galley.size().x / 2.0,
+                                    full_rect.center().y - galley.size().y / 2.0,
                                 );
+                                painter.galley(text_pos, galley, egui::Color32::WHITE);
+                            }
 
-                                // --- Overlay Rendering ---
-                                {
-                                    let m = model_arc.lock();
-                                    if slot_id < m.slots.len() {
-                                        let slot = &m.slots[slot_id];
-                                        
-                                        if slot.overlay_mode && !slot.last_translation.is_empty() {
-                                            // Draw solid background to hide original text
-                                            let bg_rect = response.rect;
-                                            painter.rect_filled(bg_rect, 0.0, egui::Color32::from_black_alpha(200));
-                                            
-                                            // Render text with automatic wrapping
-                                            ui.allocate_ui_at_rect(bg_rect, |ui| {
-                                                ui.centered_and_justified(|ui| {
-                                                    ui.add(egui::Label::new(
-                                                        egui::RichText::new(&slot.last_translation)
-                                                            .color(egui::Color32::WHITE)
-                                                            .size(18.0)
-                                                    ).selectable(false));
-                                                });
-                                            });
-                                        }
+                            // Always draw the green frame border when show_frame is on
+                            if show_border {
+                                let stroke = egui::Stroke::new(2.5, egui::Color32::from_rgb(0, 255, 128));
+                                painter.rect_stroke(full_rect, 0.0, stroke, egui::StrokeKind::Inside);
+                            }
+                        }
+                    }
+
+                    // Drag to reposition the capture region
+                    ctx.input(|i| {
+                        if i.pointer.primary_down() {
+                            let delta = i.pointer.delta();
+                            if delta != egui::Vec2::ZERO {
+                                let mut m = model_arc.lock();
+                                if slot_id < m.slots.len() {
+                                    if let Some(rect) = m.slots[slot_id].rect.as_mut() {
+                                        rect.x += delta.x as i32;
+                                        rect.y += delta.y as i32;
                                     }
                                 }
+                            }
+                        }
+                    });
 
-                                // Draw the hollow rect (always show if show_frame is true)
-                                if slot.show_frame {
-                                    let stroke = egui::Stroke::new(2.5, egui::Color32::from_rgb(0, 255, 128));
-                                    painter.rect_stroke(response.rect, 0.0, stroke, egui::StrokeKind::Inside);
-                                }
-
-                                // Allow dragging the window to move the region
-                                if response.dragged() {
-                                    let delta = response.drag_delta();
-                                    
-                                    let mut m = model_arc.lock();
-                                    if slot_id < m.slots.len() {
-                                        if let Some(rect) = m.slots[slot_id].rect.as_mut() {
-                                            rect.x += delta.x as i32;
-                                            rect.y += delta.y as i32;
-                                        }
-                                    }
-                                }
-                            });
+                    // Win32 Color Key Transparency
+                    // ─────────────────────────────
+                    // The glow backend hard-codes [0,0,0,0] clear for child viewports.
+                    // That renders as solid RGB(0,0,0) = BLACK on-screen (no DWM alpha
+                    // compositing for plain GL surfaces).  We tell DWM:
+                    //   "any pixel that is exactly (0,0,0) should be transparent."
+                    // WS_EX_LAYERED is already set by winit via .with_transparent(true).
+                    #[cfg(target_os = "windows")]
+                    unsafe {
+                        use std::ptr;
+                        use windows::Win32::Foundation::COLORREF;
+                        use windows::Win32::UI::WindowsAndMessaging::{
+                            FindWindowW, SetLayeredWindowAttributes, LWA_COLORKEY,
+                        };
+                        let title_w: Vec<u16> = format!("Frame Overlay {}\0", slot_id + 1)
+                            .encode_utf16()
+                            .collect();
+                        let hwnd = FindWindowW(
+                            windows::core::PCWSTR(ptr::null()),
+                            windows::core::PCWSTR(title_w.as_ptr()),
+                        );
+                        if let Ok(hwnd) = hwnd {
+                            if !hwnd.0.is_null() {
+                                let _ = SetLayeredWindowAttributes(
+                                    hwnd,
+                                    COLORREF(0x000000), // pure black → transparent
+                                    0,
+                                    LWA_COLORKEY,
+                                );
+                            }
+                        }
                     }
                 },
             );
