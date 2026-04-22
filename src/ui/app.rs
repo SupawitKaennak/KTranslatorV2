@@ -129,8 +129,20 @@ pub struct App {
     /// Available displays for capturing (ID, Label)
     available_screens: Vec<(u32, String)>,
 
-    /// Cache for smart_hash -> (ocr_text, translated_text)
+    /// Cache for smart_hash → (ocr_text, translated_text)
     translation_cache: Arc<Mutex<std::collections::HashMap<u64, (String, String)>>>,
+
+    /// Cache for OCR text hash → translated_text.
+    /// Catches cases where the same text appears with different pixel content
+    /// (e.g., cursor blink, slight background variation) without re-calling the API.
+    text_translation_cache: Arc<Mutex<std::collections::HashMap<u64, String>>>,
+
+    /// Per-slot cache of the raw HWND (as isize) for the overlay window.
+    /// We call FindWindowW every frame (cheap) and re-apply SetLayeredWindowAttributes
+    /// only when the HWND changes — this handles window recreation after model switch,
+    /// overlay mode toggle, or any other event that causes egui to recreate the child window.
+    /// 0 = not yet found.
+    overlay_hwnd_cache: Vec<Arc<std::sync::atomic::AtomicIsize>>,
 }
 
 impl App {
@@ -221,6 +233,8 @@ impl App {
                 })
                 .collect(),
             translation_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            text_translation_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            overlay_hwnd_cache: vec![Arc::new(std::sync::atomic::AtomicIsize::new(0))],
         }
     }
 
@@ -529,6 +543,13 @@ impl App {
             let model_arc = self.model.clone();
             let slot_id = slot.id.0;
 
+            // Ensure the Vec is large enough (can happen on first run before Add Region)
+            while self.overlay_hwnd_cache.len() <= slot_id {
+                self.overlay_hwnd_cache.push(Arc::new(std::sync::atomic::AtomicIsize::new(0)));
+            }
+            // Clone the Arc so the closure can own it without needing &mut self
+            let hwnd_cache = self.overlay_hwnd_cache[slot_id].clone();
+
             ctx.show_viewport_immediate(
                 viewport_id,
                 egui::ViewportBuilder::default()
@@ -548,8 +569,6 @@ impl App {
                     }
 
                     // Paint directly on the transparent GPU-cleared surface.
-                    // Deliberately avoids CentralPanel which always fills panel_fill
-                    // (white/dark) over the wgpu-transparent background.
                     let full_rect = ctx.screen_rect();
                     let painter = ctx.layer_painter(egui::LayerId::background());
 
@@ -607,12 +626,10 @@ impl App {
                     });
 
                     // Win32 Color Key Transparency
-                    // ─────────────────────────────
-                    // The glow backend hard-codes [0,0,0,0] clear for child viewports.
-                    // That renders as solid RGB(0,0,0) = BLACK on-screen (no DWM alpha
-                    // compositing for plain GL surfaces).  We tell DWM:
-                    //   "any pixel that is exactly (0,0,0) should be transparent."
-                    // WS_EX_LAYERED is already set by winit via .with_transparent(true).
+                    // FindWindowW is cheap (~0.1 ms); we call it every frame and compare
+                    // with the cached HWND. SetLayeredWindowAttributes is only called when
+                    // the HWND changes (window recreated after model switch / overlay toggle)
+                    // or on first appearance. This is robust against all window recreation.
                     #[cfg(target_os = "windows")]
                     unsafe {
                         use std::ptr;
@@ -623,18 +640,21 @@ impl App {
                         let title_w: Vec<u16> = format!("Frame Overlay {}\0", slot_id + 1)
                             .encode_utf16()
                             .collect();
-                        let hwnd = FindWindowW(
+                        if let Ok(hwnd) = FindWindowW(
                             windows::core::PCWSTR(ptr::null()),
                             windows::core::PCWSTR(title_w.as_ptr()),
-                        );
-                        if let Ok(hwnd) = hwnd {
-                            if !hwnd.0.is_null() {
+                        ) {
+                            let raw = hwnd.0 as isize;
+                            let cached = hwnd_cache.load(std::sync::atomic::Ordering::Relaxed);
+                            if raw != 0 && raw != cached {
+                                // HWND is new or changed — (re-)apply color key
                                 let _ = SetLayeredWindowAttributes(
                                     hwnd,
                                     COLORREF(0x000000), // pure black → transparent
                                     0,
                                     LWA_COLORKEY,
                                 );
+                                hwnd_cache.store(raw, std::sync::atomic::Ordering::Relaxed);
                             }
                         }
                     }
@@ -642,6 +662,7 @@ impl App {
             );
         }
     }
+
 
     // -----------------------------------------------------------------------
     // Background processing: capture → compare → OCR+Translate (if changed)
@@ -772,20 +793,24 @@ impl App {
             let gemini = self.gemini_translator.clone();
             let tx = self.bg_tx.clone();
             let prev_hash = self.last_frame_hash[i];
-            
+
             // Debounce variables
             let stable_hash = slot.stable_hash;
             let stable_since_ms = slot.stable_since_ms;
             let debounce_dur_ms = 800; // minimum time screen must be stable before OCR
 
             let cache_arc = self.translation_cache.clone();
+            let text_cache_arc = self.text_translation_cache.clone();
 
             std::thread::spawn(move || {
                 let result = (|| -> anyhow::Result<BgResult> {
                     let mut frame = capture.capture_rect(rect, display_id)?;
 
-                    // Apply Black & White Thresholding directly to the image buffer
-                    // This creates infinite contrast for local OCR.
+                    // Hash BEFORE thresholding so the debounce reflects actual screen
+                    // content changes rather than BW post-processing artifacts.
+                    let hash = smart_hash(&frame.data);
+
+                    // Apply Black & White Thresholding for local OCR accuracy.
                     for chunk in frame.data.chunks_exact_mut(4) {
                         let r = chunk[0] as f32;
                         let g = chunk[1] as f32;
@@ -798,24 +823,22 @@ impl App {
                         chunk[3] = 255;
                     }
 
-                    let hash = smart_hash(&frame.data);
-
                     // 1. Debounce state machine (Visual stability)
                     if hash != stable_hash {
                         return Ok(BgResult::HashChanged { slot_idx: i, new_hash: hash });
                     }
-                    
+
                     let now = Self::now_ms();
                     if now.saturating_sub(stable_since_ms) < debounce_dur_ms {
                         return Ok(BgResult::WaitingDebounce { slot_idx: i });
                     }
 
-                    // 2. Hash is fully stable! Has it changed since the LAST successful translation?
+                    // 2. Hash stable — did it change since the last translation?
                     if hash == prev_hash && prev_hash != 0 {
                         return Ok(BgResult::Unchanged { slot_idx: i });
                     }
 
-                    // 3. New stable scene. Check Cache!
+                    // 3. New stable scene — check frame-hash cache first.
                     {
                         let cache = cache_arc.lock();
                         if let Some((ocr, tra)) = cache.get(&hash) {
@@ -827,7 +850,7 @@ impl App {
                             });
                         }
                     }
-                    
+
                     // Signal heavy work starting (triggers UI spinner)
                     let _ = tx.send(BgResult::Translating { slot_idx: i });
 
@@ -844,18 +867,68 @@ impl App {
                         });
                     }
 
-                    // 5. Hit Gemini API for TEXT ONLY translation.
+                    // 4b. Fast-path: same source == target language — no API needed.
+                    if source_lang.as_ref().map(|s| s.0 == target_lang.0).unwrap_or(false) {
+                        let mut cache = cache_arc.lock();
+                        cache.insert(hash, (ocr_text.clone(), ocr_text.clone()));
+                        return Ok(BgResult::Done {
+                            slot_idx: i,
+                            ocr_text: ocr_text.clone(),
+                            translated: ocr_text,
+                            frame_hash: hash,
+                        });
+                    }
+
+                    // 4c. Text-level cache: same OCR text seen before → reuse translation.
+                    {
+                        let text_hash = {
+                            let mut h: u64 = 0xcbf29ce484222325;
+                            for b in ocr_text.as_bytes() {
+                                h ^= *b as u64;
+                                h = h.wrapping_mul(0x100000001b3);
+                            }
+                            h
+                        };
+                        // Clone the translation out before releasing the guard
+                        let cached = {
+                            let text_cache = text_cache_arc.lock();
+                            text_cache.get(&text_hash).cloned()
+                        };
+                        if let Some(cached_trans) = cached {
+                            let mut cache = cache_arc.lock();
+                            cache.insert(hash, (ocr_text.clone(), cached_trans.clone()));
+                            return Ok(BgResult::Done {
+                                slot_idx: i,
+                                ocr_text,
+                                translated: cached_trans,
+                                frame_hash: hash,
+                            });
+                        }
+                    }
+
+                    // 5. Hit Gemini API for TEXT-ONLY translation.
                     if let Some(g) = &gemini {
                         let translated = g.translate(
                             &ocr_text,
                             source_lang.as_ref(),
                             &target_lang,
                         )?;
-                        
-                        // Save into cache
+
+                        // Save into both caches so we never re-translate the same text.
                         {
-                            let mut cache = cache_arc.lock();
-                            cache.insert(hash, (ocr_text.clone(), translated.clone()));
+                            let text_hash = {
+                                let mut h: u64 = 0xcbf29ce484222325;
+                                for b in ocr_text.as_bytes() {
+                                    h ^= *b as u64;
+                                    h = h.wrapping_mul(0x100000001b3);
+                                }
+                                h
+                            };
+                            let mut frame_cache = cache_arc.lock();
+                            frame_cache.insert(hash, (ocr_text.clone(), translated.clone()));
+                            drop(frame_cache);
+                            let mut text_cache = text_cache_arc.lock();
+                            text_cache.insert(text_hash, translated.clone());
                         }
 
                         Ok(BgResult::Done {
@@ -1080,6 +1153,7 @@ impl eframe::App for App {
                     self.slot_busy.push(false);
                     self.slot_processing.push(false);
                     self.last_frame_hash.push(0);
+                    self.overlay_hwnd_cache.push(Arc::new(std::sync::atomic::AtomicIsize::new(0)));
                 }
             });
 
@@ -1095,7 +1169,10 @@ impl eframe::App for App {
                 self.slot_busy.remove(idx);
                 self.slot_processing.remove(idx);
                 self.last_frame_hash.remove(idx);
-                
+                if idx < self.overlay_hwnd_cache.len() {
+                    self.overlay_hwnd_cache.remove(idx);
+                }
+
                 // Re-align Region IDs so they match array index
                 for (i, slot) in model.slots.iter_mut().enumerate() {
                     slot.id.0 = i;
