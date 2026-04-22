@@ -11,7 +11,7 @@ use crate::{
     },
     core::{
         model::AppModel,
-        ports::{FrameSource, OcrEngine, Translator},
+        ports::{FrameSource, OcrTextLine, Translator},
         types::{LanguageTag, Rect},
     },
     infra::settings::{load_settings, save_settings, Settings},
@@ -29,6 +29,8 @@ enum BgResult {
         ocr_text: String,
         translated: String,
         frame_hash: u64,
+        /// Per-line OCR bounding boxes for positional overlay rendering.
+        ocr_lines: Vec<OcrTextLine>,
     },
     /// The captured frame is identical to the previous one — skip API call.
     Unchanged {
@@ -578,30 +580,110 @@ impl App {
                             let slot = &m.slots[slot_id];
                             let show_overlay = slot.overlay_mode && !slot.last_translation.is_empty();
                             let show_border  = slot.show_frame;
-                            let text = slot.last_translation.clone();
+                            let ocr_lines    = slot.last_ocr_lines.clone();
+                            let trans_lines  = slot.last_trans_lines.clone();
+                            let fallback_text = slot.last_translation.clone();
                             drop(m);
 
-                            // Overlay mode: solid dark background (NOT pure black — black is our
-                            // Win32 color key and would become transparent). Use dark navy instead.
                             if show_overlay {
-                                painter.rect_filled(full_rect, 0.0, egui::Color32::from_rgb(15, 15, 30));
+                                // ── Positional overlay ────────────────────────────────────────
+                                // Background is TRANSPARENT. Only the small dark rect behind
+                                // each translated line is drawn, matching the original text position.
+                                let has_positions = !ocr_lines.is_empty();
 
-                                let galley = ctx.fonts(|f| {
-                                    f.layout(
-                                        text,
-                                        egui::FontId::proportional(18.0),
-                                        egui::Color32::WHITE,
-                                        full_rect.width() - 16.0,
-                                    )
-                                });
-                                let text_pos = egui::pos2(
-                                    full_rect.center().x - galley.size().x / 2.0,
-                                    full_rect.center().y - galley.size().y / 2.0,
-                                );
-                                painter.galley(text_pos, galley, egui::Color32::WHITE);
+                                if has_positions {
+                                    for (idx, ocr_line) in ocr_lines.iter().enumerate() {
+                                        let trans = trans_lines
+                                            .get(idx)
+                                            .map(|s| s.as_str())
+                                            .unwrap_or("");
+                                        if trans.trim().is_empty() { continue; }
+
+                                        // Font size ~90% of OCR line height, clamped sensibly
+                                        let font_size = (ocr_line.h * 0.90).clamp(11.0, 26.0);
+
+                                        let galley = ctx.fonts(|f| {
+                                            f.layout_no_wrap(
+                                                trans.to_string(),
+                                                egui::FontId::proportional(font_size),
+                                                egui::Color32::WHITE,
+                                            )
+                                        });
+
+                                        // Align translated text to the left edge of the OCR line
+                                        let text_pos = egui::pos2(ocr_line.x, ocr_line.y);
+                                        let text_size = galley.size();
+
+                                        // Dark rounded background only behind this line
+                                        let pad = egui::vec2(5.0, 3.0);
+                                        let bg = egui::Rect::from_min_size(
+                                            text_pos - pad,
+                                            text_size + pad * 2.0,
+                                        );
+                                        painter.rect_filled(
+                                            bg,
+                                            4.0,
+                                            // NOT from_black_alpha — pure RGB(0,0,0) gets
+                                            // color-keyed to transparent by Win32 LWA_COLORKEY.
+                                            // Use dark navy (non-zero RGB) instead.
+                                            egui::Color32::from_rgba_unmultiplied(18, 18, 30, 220),
+                                        );
+                                        painter.galley(text_pos, galley, egui::Color32::WHITE);
+                                    }
+
+                                    // Render any extra translated lines below the last OCR line
+                                    if trans_lines.len() > ocr_lines.len() {
+                                        let last = ocr_lines.last().unwrap();
+                                        let mut y = last.y + last.h + 4.0;
+                                        for extra in &trans_lines[ocr_lines.len()..] {
+                                            if extra.trim().is_empty() { continue; }
+                                            let galley = ctx.fonts(|f| {
+                                                f.layout_no_wrap(
+                                                    extra.clone(),
+                                                    egui::FontId::proportional(14.0),
+                                                    egui::Color32::WHITE,
+                                                )
+                                            });
+                                            let pos = egui::pos2(last.x, y);
+                                            let bg = egui::Rect::from_min_size(
+                                                pos - egui::vec2(5.0, 3.0),
+                                                galley.size() + egui::vec2(10.0, 6.0),
+                                            );
+                                            painter.rect_filled(bg, 4.0, egui::Color32::from_rgba_unmultiplied(18, 18, 30, 220));
+                                            let line_h = galley.size().y;
+                                            painter.galley(pos, galley, egui::Color32::WHITE);
+                                            y += line_h + 4.0;
+                                        }
+                                    }
+                                } else {
+                                    // Fallback: no position info (cache hit) — stack lines vertically centered
+                                    let font_size = 16.0_f32;
+                                    let mut y = full_rect.top() + 8.0;
+                                    for line in fallback_text.lines() {
+                                        if line.trim().is_empty() { continue; }
+                                        let galley = ctx.fonts(|f| {
+                                            f.layout_no_wrap(
+                                                line.to_string(),
+                                                egui::FontId::proportional(font_size),
+                                                egui::Color32::WHITE,
+                                            )
+                                        });
+                                        let x = (full_rect.center().x - galley.size().x / 2.0)
+                                            .clamp(full_rect.left() + 4.0, full_rect.right() - 4.0);
+                                        let pos = egui::pos2(x, y);
+                                        let bg = egui::Rect::from_min_size(
+                                            pos - egui::vec2(5.0, 3.0),
+                                            galley.size() + egui::vec2(10.0, 6.0),
+                                        );
+                                        painter.rect_filled(bg, 4.0, egui::Color32::from_rgba_unmultiplied(18, 18, 30, 220));
+                                        let line_h = galley.size().y;
+                                        painter.galley(pos, galley, egui::Color32::WHITE);
+                                        y += line_h + 4.0;
+                                    }
+                                }
                             }
 
-                            // Always draw the green frame border when show_frame is on
+                            // Green frame border (shown when Show Frame Box is ticked)
                             if show_border {
                                 let stroke = egui::Stroke::new(2.5, egui::Color32::from_rgb(0, 255, 128));
                                 painter.rect_stroke(full_rect, 0.0, stroke, egui::StrokeKind::Inside);
@@ -684,6 +766,7 @@ impl App {
                     ocr_text,
                     translated,
                     frame_hash,
+                    ocr_lines,
                 } => {
                     self.slot_busy[slot_idx] = false;
                     self.slot_processing[slot_idx] = false;
@@ -694,7 +777,6 @@ impl App {
                     slot.next_tick_at_ms = now.saturating_add(slot.refresh_ms.max(500));
 
                     // Only update UI if the OCR text actually changed
-                    // (prevents flickering when content is the same)
                     let new_ocr = ocr_text.trim();
                     let old_ocr = slot.last_ocr_text.trim();
                     let content_changed = !new_ocr.is_empty() && new_ocr != old_ocr;
@@ -702,11 +784,16 @@ impl App {
                     if content_changed {
                         slot.last_ocr_text = ocr_text;
                         if !translated.trim().is_empty() {
+                            // Split translation into per-line strings to match OCR positions
+                            slot.last_trans_lines = translated
+                                .lines()
+                                .map(|s| s.to_string())
+                                .collect();
+                            slot.last_ocr_lines = ocr_lines;
                             slot.last_translation = translated;
                             slot.pending_text.clear();
                         }
                     }
-                    // Clear any previous error on success
                     self.last_error = None;
                 }
                 BgResult::Unchanged { slot_idx } => {
@@ -854,8 +941,13 @@ impl App {
                     // Signal heavy work starting (triggers UI spinner)
                     let _ = tx.send(BgResult::Translating { slot_idx: i });
 
-                    // 4. Local OCR (Offline)
-                    let ocr_text = windows_ocr.recognize(&frame, source_lang.as_ref())?;
+                    // 4. Local OCR with layout (Offline)
+                    let ocr_lines = windows_ocr.recognize_lines(&frame, source_lang.as_ref())?;
+                    let ocr_text = ocr_lines
+                        .iter()
+                        .map(|l| l.text.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n");
                     let ocr_text = ocr_text.trim().to_string();
 
                     if ocr_text.is_empty() {
@@ -864,6 +956,7 @@ impl App {
                             ocr_text: String::new(),
                             translated: String::new(),
                             frame_hash: hash,
+                            ocr_lines: Vec::new(),
                         });
                     }
 
@@ -876,6 +969,7 @@ impl App {
                             ocr_text: ocr_text.clone(),
                             translated: ocr_text,
                             frame_hash: hash,
+                            ocr_lines,
                         });
                     }
 
@@ -902,6 +996,7 @@ impl App {
                                 ocr_text,
                                 translated: cached_trans,
                                 frame_hash: hash,
+                                ocr_lines,
                             });
                         }
                     }
@@ -936,6 +1031,7 @@ impl App {
                             ocr_text,
                             translated,
                             frame_hash: hash,
+                            ocr_lines,
                         })
                     } else {
                         anyhow::bail!("Gemini API key not set — click ⚙ to configure");

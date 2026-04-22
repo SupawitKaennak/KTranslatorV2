@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::core::types::{LanguageTag, Rect, RegionId};
+use crate::core::{
+    ports::OcrTextLine,
+    types::{LanguageTag, Rect, RegionId},
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegionSlot {
@@ -18,6 +21,13 @@ pub struct RegionSlot {
     pub refresh_ms: u64,
     pub last_ocr_text: String,
     pub last_translation: String,
+    /// Per-line OCR results with bounding boxes (image-pixel coordinates).
+    /// Used by the positional overlay to place translated text at the right position.
+    #[serde(skip)]
+    pub last_ocr_lines: Vec<OcrTextLine>,
+    /// Translation split by newline, matched index-for-index with last_ocr_lines.
+    #[serde(skip)]
+    pub last_trans_lines: Vec<String>,
     pub pending_text: String,
     pub next_tick_at_ms: u64,
     pub translate_backoff_ms: u64,
@@ -48,6 +58,8 @@ impl AppModel {
             refresh_ms: 5000,
             last_ocr_text: String::new(),
             last_translation: String::new(),
+            last_ocr_lines: Vec::new(),
+            last_trans_lines: Vec::new(),
             pending_text: String::new(),
             next_tick_at_ms: 0,
             translate_backoff_ms: 0,
@@ -75,6 +87,8 @@ impl AppModel {
             refresh_ms: 5000,
             last_ocr_text: String::new(),
             last_translation: String::new(),
+            last_ocr_lines: Vec::new(),
+            last_trans_lines: Vec::new(),
             pending_text: String::new(),
             next_tick_at_ms: 0,
             translate_backoff_ms: 0,
