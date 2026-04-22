@@ -1,3 +1,7 @@
+//! Gemini Vision–based OCR adapter.  Kept as a future fallback for when Windows
+//! OCR is unavailable. Not wired into the main pipeline yet.
+#![allow(dead_code)]
+
 use anyhow::{bail, Context, Result};
 use base64::Engine;
 use image::ImageBuffer;
@@ -18,6 +22,8 @@ pub struct OcrTranslateResult {
 
 /// OCR adapter that uses Gemini Vision to extract text from screenshots.
 /// Also supports a combined OCR+Translate call that halves API usage.
+/// Kept for future use as an alternative when Windows OCR is unavailable.
+#[allow(dead_code)]
 #[derive(Clone)]
 pub struct GeminiOcr {
     client: Client,

@@ -11,7 +11,7 @@ use crate::{
     },
     core::{
         model::AppModel,
-        ports::{FrameSource, OcrEngine, Translator},
+        ports::{FrameSource, OcrTextLine, Translator},
         types::{LanguageTag, Rect},
     },
     infra::settings::{load_settings, save_settings, Settings},
@@ -29,6 +29,8 @@ enum BgResult {
         ocr_text: String,
         translated: String,
         frame_hash: u64,
+        /// Per-line OCR bounding boxes for positional overlay rendering.
+        ocr_lines: Vec<OcrTextLine>,
     },
     /// The captured frame is identical to the previous one — skip API call.
     Unchanged {
@@ -129,8 +131,20 @@ pub struct App {
     /// Available displays for capturing (ID, Label)
     available_screens: Vec<(u32, String)>,
 
-    /// Cache for smart_hash -> (ocr_text, translated_text)
+    /// Cache for smart_hash → (ocr_text, translated_text)
     translation_cache: Arc<Mutex<std::collections::HashMap<u64, (String, String)>>>,
+
+    /// Cache for OCR text hash → translated_text.
+    /// Catches cases where the same text appears with different pixel content
+    /// (e.g., cursor blink, slight background variation) without re-calling the API.
+    text_translation_cache: Arc<Mutex<std::collections::HashMap<u64, String>>>,
+
+    /// Per-slot cache of the raw HWND (as isize) for the overlay window.
+    /// We call FindWindowW every frame (cheap) and re-apply SetLayeredWindowAttributes
+    /// only when the HWND changes — this handles window recreation after model switch,
+    /// overlay mode toggle, or any other event that causes egui to recreate the child window.
+    /// 0 = not yet found.
+    overlay_hwnd_cache: Vec<Arc<std::sync::atomic::AtomicIsize>>,
 }
 
 impl App {
@@ -221,6 +235,8 @@ impl App {
                 })
                 .collect(),
             translation_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            text_translation_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            overlay_hwnd_cache: vec![Arc::new(std::sync::atomic::AtomicIsize::new(0))],
         }
     }
 
@@ -529,6 +545,13 @@ impl App {
             let model_arc = self.model.clone();
             let slot_id = slot.id.0;
 
+            // Ensure the Vec is large enough (can happen on first run before Add Region)
+            while self.overlay_hwnd_cache.len() <= slot_id {
+                self.overlay_hwnd_cache.push(Arc::new(std::sync::atomic::AtomicIsize::new(0)));
+            }
+            // Clone the Arc so the closure can own it without needing &mut self
+            let hwnd_cache = self.overlay_hwnd_cache[slot_id].clone();
+
             ctx.show_viewport_immediate(
                 viewport_id,
                 egui::ViewportBuilder::default()
@@ -541,68 +564,187 @@ impl App {
                     .with_position(egui::pos2(r.x as f32, r.y as f32)),
                 move |ctx, class| {
                     if matches!(class, egui::ViewportClass::Embedded) {
-                        // fallback if transparency not supported, but usually is.
                         egui::CentralPanel::default().show(ctx, |ui| {
                             ui.label("Frame Viewer (Embedded)");
                         });
-                    } else {
-                        egui::CentralPanel::default()
-                            .frame(egui::Frame::NONE.fill(egui::Color32::TRANSPARENT))
-                            .show(ctx, |ui| {
-                                let (response, painter) = ui.allocate_painter(
-                                    ui.available_size(),
-                                    egui::Sense::click_and_drag(),
-                                );
+                        return;
+                    }
 
-                                // --- Overlay Rendering ---
-                                {
-                                    let m = model_arc.lock();
-                                    if slot_id < m.slots.len() {
-                                        let slot = &m.slots[slot_id];
-                                        
-                                        if slot.overlay_mode && !slot.last_translation.is_empty() {
-                                            // Draw solid background to hide original text
-                                            let bg_rect = response.rect;
-                                            painter.rect_filled(bg_rect, 0.0, egui::Color32::from_black_alpha(200));
-                                            
-                                            // Render text with automatic wrapping
-                                            ui.allocate_ui_at_rect(bg_rect, |ui| {
-                                                ui.centered_and_justified(|ui| {
-                                                    ui.add(egui::Label::new(
-                                                        egui::RichText::new(&slot.last_translation)
-                                                            .color(egui::Color32::WHITE)
-                                                            .size(18.0)
-                                                    ).selectable(false));
-                                                });
+                    // Paint directly on the transparent GPU-cleared surface.
+                    let full_rect = ctx.screen_rect();
+                    let painter = ctx.layer_painter(egui::LayerId::background());
+
+                    {
+                        let m = model_arc.lock();
+                        if slot_id < m.slots.len() {
+                            let slot = &m.slots[slot_id];
+                            let show_overlay = slot.overlay_mode && !slot.last_translation.is_empty();
+                            let show_border  = slot.show_frame;
+                            let ocr_lines    = slot.last_ocr_lines.clone();
+                            let trans_lines  = slot.last_trans_lines.clone();
+                            let fallback_text = slot.last_translation.clone();
+                            drop(m);
+
+                            if show_overlay {
+                                // ── Positional overlay ────────────────────────────────────────
+                                // Background is TRANSPARENT. Only the small dark rect behind
+                                // each translated line is drawn, matching the original text position.
+                                let has_positions = !ocr_lines.is_empty();
+
+                                if has_positions {
+                                    for (idx, ocr_line) in ocr_lines.iter().enumerate() {
+                                        let trans = trans_lines
+                                            .get(idx)
+                                            .map(|s| s.as_str())
+                                            .unwrap_or("");
+                                        if trans.trim().is_empty() { continue; }
+
+                                        // Font size ~90% of OCR line height, clamped sensibly
+                                        let font_size = (ocr_line.h * 0.90).clamp(11.0, 26.0);
+
+                                        let galley = ctx.fonts(|f| {
+                                            f.layout_no_wrap(
+                                                trans.to_string(),
+                                                egui::FontId::proportional(font_size),
+                                                egui::Color32::WHITE,
+                                            )
+                                        });
+
+                                        // Align translated text to the left edge of the OCR line
+                                        let text_pos = egui::pos2(ocr_line.x, ocr_line.y);
+                                        let text_size = galley.size();
+
+                                        // Dark rounded background only behind this line
+                                        let pad = egui::vec2(5.0, 3.0);
+                                        let bg = egui::Rect::from_min_size(
+                                            text_pos - pad,
+                                            text_size + pad * 2.0,
+                                        );
+                                        painter.rect_filled(
+                                            bg,
+                                            4.0,
+                                            // NOT from_black_alpha — pure RGB(0,0,0) gets
+                                            // color-keyed to transparent by Win32 LWA_COLORKEY.
+                                            // Use dark navy (non-zero RGB) instead.
+                                            egui::Color32::from_rgba_unmultiplied(18, 18, 30, 220),
+                                        );
+                                        painter.galley(text_pos, galley, egui::Color32::WHITE);
+                                    }
+
+                                    // Render any extra translated lines below the last OCR line
+                                    if trans_lines.len() > ocr_lines.len() {
+                                        let last = ocr_lines.last().unwrap();
+                                        let mut y = last.y + last.h + 4.0;
+                                        for extra in &trans_lines[ocr_lines.len()..] {
+                                            if extra.trim().is_empty() { continue; }
+                                            let galley = ctx.fonts(|f| {
+                                                f.layout_no_wrap(
+                                                    extra.clone(),
+                                                    egui::FontId::proportional(14.0),
+                                                    egui::Color32::WHITE,
+                                                )
                                             });
+                                            let pos = egui::pos2(last.x, y);
+                                            let bg = egui::Rect::from_min_size(
+                                                pos - egui::vec2(5.0, 3.0),
+                                                galley.size() + egui::vec2(10.0, 6.0),
+                                            );
+                                            painter.rect_filled(bg, 4.0, egui::Color32::from_rgba_unmultiplied(18, 18, 30, 220));
+                                            let line_h = galley.size().y;
+                                            painter.galley(pos, galley, egui::Color32::WHITE);
+                                            y += line_h + 4.0;
                                         }
                                     }
-                                }
-
-                                // Draw the hollow rect (always show if show_frame is true)
-                                if slot.show_frame {
-                                    let stroke = egui::Stroke::new(2.5, egui::Color32::from_rgb(0, 255, 128));
-                                    painter.rect_stroke(response.rect, 0.0, stroke, egui::StrokeKind::Inside);
-                                }
-
-                                // Allow dragging the window to move the region
-                                if response.dragged() {
-                                    let delta = response.drag_delta();
-                                    
-                                    let mut m = model_arc.lock();
-                                    if slot_id < m.slots.len() {
-                                        if let Some(rect) = m.slots[slot_id].rect.as_mut() {
-                                            rect.x += delta.x as i32;
-                                            rect.y += delta.y as i32;
-                                        }
+                                } else {
+                                    // Fallback: no position info (cache hit) — stack lines vertically centered
+                                    let font_size = 16.0_f32;
+                                    let mut y = full_rect.top() + 8.0;
+                                    for line in fallback_text.lines() {
+                                        if line.trim().is_empty() { continue; }
+                                        let galley = ctx.fonts(|f| {
+                                            f.layout_no_wrap(
+                                                line.to_string(),
+                                                egui::FontId::proportional(font_size),
+                                                egui::Color32::WHITE,
+                                            )
+                                        });
+                                        let x = (full_rect.center().x - galley.size().x / 2.0)
+                                            .clamp(full_rect.left() + 4.0, full_rect.right() - 4.0);
+                                        let pos = egui::pos2(x, y);
+                                        let bg = egui::Rect::from_min_size(
+                                            pos - egui::vec2(5.0, 3.0),
+                                            galley.size() + egui::vec2(10.0, 6.0),
+                                        );
+                                        painter.rect_filled(bg, 4.0, egui::Color32::from_rgba_unmultiplied(18, 18, 30, 220));
+                                        let line_h = galley.size().y;
+                                        painter.galley(pos, galley, egui::Color32::WHITE);
+                                        y += line_h + 4.0;
                                     }
                                 }
-                            });
+                            }
+
+                            // Green frame border (shown when Show Frame Box is ticked)
+                            if show_border {
+                                let stroke = egui::Stroke::new(2.5, egui::Color32::from_rgb(0, 255, 128));
+                                painter.rect_stroke(full_rect, 0.0, stroke, egui::StrokeKind::Inside);
+                            }
+                        }
+                    }
+
+                    // Drag to reposition the capture region
+                    ctx.input(|i| {
+                        if i.pointer.primary_down() {
+                            let delta = i.pointer.delta();
+                            if delta != egui::Vec2::ZERO {
+                                let mut m = model_arc.lock();
+                                if slot_id < m.slots.len() {
+                                    if let Some(rect) = m.slots[slot_id].rect.as_mut() {
+                                        rect.x += delta.x as i32;
+                                        rect.y += delta.y as i32;
+                                    }
+                                }
+                            }
+                        }
+                    });
+
+                    // Win32 Color Key Transparency
+                    // FindWindowW is cheap (~0.1 ms); we call it every frame and compare
+                    // with the cached HWND. SetLayeredWindowAttributes is only called when
+                    // the HWND changes (window recreated after model switch / overlay toggle)
+                    // or on first appearance. This is robust against all window recreation.
+                    #[cfg(target_os = "windows")]
+                    unsafe {
+                        use std::ptr;
+                        use windows::Win32::Foundation::COLORREF;
+                        use windows::Win32::UI::WindowsAndMessaging::{
+                            FindWindowW, SetLayeredWindowAttributes, LWA_COLORKEY,
+                        };
+                        let title_w: Vec<u16> = format!("Frame Overlay {}\0", slot_id + 1)
+                            .encode_utf16()
+                            .collect();
+                        if let Ok(hwnd) = FindWindowW(
+                            windows::core::PCWSTR(ptr::null()),
+                            windows::core::PCWSTR(title_w.as_ptr()),
+                        ) {
+                            let raw = hwnd.0 as isize;
+                            let cached = hwnd_cache.load(std::sync::atomic::Ordering::Relaxed);
+                            if raw != 0 && raw != cached {
+                                // HWND is new or changed — (re-)apply color key
+                                let _ = SetLayeredWindowAttributes(
+                                    hwnd,
+                                    COLORREF(0x000000), // pure black → transparent
+                                    0,
+                                    LWA_COLORKEY,
+                                );
+                                hwnd_cache.store(raw, std::sync::atomic::Ordering::Relaxed);
+                            }
+                        }
                     }
                 },
             );
         }
     }
+
 
     // -----------------------------------------------------------------------
     // Background processing: capture → compare → OCR+Translate (if changed)
@@ -624,6 +766,7 @@ impl App {
                     ocr_text,
                     translated,
                     frame_hash,
+                    ocr_lines,
                 } => {
                     self.slot_busy[slot_idx] = false;
                     self.slot_processing[slot_idx] = false;
@@ -634,7 +777,6 @@ impl App {
                     slot.next_tick_at_ms = now.saturating_add(slot.refresh_ms.max(500));
 
                     // Only update UI if the OCR text actually changed
-                    // (prevents flickering when content is the same)
                     let new_ocr = ocr_text.trim();
                     let old_ocr = slot.last_ocr_text.trim();
                     let content_changed = !new_ocr.is_empty() && new_ocr != old_ocr;
@@ -642,11 +784,16 @@ impl App {
                     if content_changed {
                         slot.last_ocr_text = ocr_text;
                         if !translated.trim().is_empty() {
+                            // Split translation into per-line strings to match OCR positions
+                            slot.last_trans_lines = translated
+                                .lines()
+                                .map(|s| s.to_string())
+                                .collect();
+                            slot.last_ocr_lines = ocr_lines;
                             slot.last_translation = translated;
                             slot.pending_text.clear();
                         }
                     }
-                    // Clear any previous error on success
                     self.last_error = None;
                 }
                 BgResult::Unchanged { slot_idx } => {
@@ -733,20 +880,24 @@ impl App {
             let gemini = self.gemini_translator.clone();
             let tx = self.bg_tx.clone();
             let prev_hash = self.last_frame_hash[i];
-            
+
             // Debounce variables
             let stable_hash = slot.stable_hash;
             let stable_since_ms = slot.stable_since_ms;
             let debounce_dur_ms = 800; // minimum time screen must be stable before OCR
 
             let cache_arc = self.translation_cache.clone();
+            let text_cache_arc = self.text_translation_cache.clone();
 
             std::thread::spawn(move || {
                 let result = (|| -> anyhow::Result<BgResult> {
                     let mut frame = capture.capture_rect(rect, display_id)?;
 
-                    // Apply Black & White Thresholding directly to the image buffer
-                    // This creates infinite contrast for local OCR.
+                    // Hash BEFORE thresholding so the debounce reflects actual screen
+                    // content changes rather than BW post-processing artifacts.
+                    let hash = smart_hash(&frame.data);
+
+                    // Apply Black & White Thresholding for local OCR accuracy.
                     for chunk in frame.data.chunks_exact_mut(4) {
                         let r = chunk[0] as f32;
                         let g = chunk[1] as f32;
@@ -759,24 +910,22 @@ impl App {
                         chunk[3] = 255;
                     }
 
-                    let hash = smart_hash(&frame.data);
-
                     // 1. Debounce state machine (Visual stability)
                     if hash != stable_hash {
                         return Ok(BgResult::HashChanged { slot_idx: i, new_hash: hash });
                     }
-                    
+
                     let now = Self::now_ms();
                     if now.saturating_sub(stable_since_ms) < debounce_dur_ms {
                         return Ok(BgResult::WaitingDebounce { slot_idx: i });
                     }
 
-                    // 2. Hash is fully stable! Has it changed since the LAST successful translation?
+                    // 2. Hash stable — did it change since the last translation?
                     if hash == prev_hash && prev_hash != 0 {
                         return Ok(BgResult::Unchanged { slot_idx: i });
                     }
 
-                    // 3. New stable scene. Check Cache!
+                    // 3. New stable scene — check frame-hash cache first.
                     {
                         let cache = cache_arc.lock();
                         if let Some((ocr, tra)) = cache.get(&hash) {
@@ -788,12 +937,17 @@ impl App {
                             });
                         }
                     }
-                    
+
                     // Signal heavy work starting (triggers UI spinner)
                     let _ = tx.send(BgResult::Translating { slot_idx: i });
 
-                    // 4. Local OCR (Offline)
-                    let ocr_text = windows_ocr.recognize(&frame, source_lang.as_ref())?;
+                    // 4. Local OCR with layout (Offline)
+                    let ocr_lines = windows_ocr.recognize_lines(&frame, source_lang.as_ref())?;
+                    let ocr_text = ocr_lines
+                        .iter()
+                        .map(|l| l.text.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n");
                     let ocr_text = ocr_text.trim().to_string();
 
                     if ocr_text.is_empty() {
@@ -802,21 +956,74 @@ impl App {
                             ocr_text: String::new(),
                             translated: String::new(),
                             frame_hash: hash,
+                            ocr_lines: Vec::new(),
                         });
                     }
 
-                    // 5. Hit Gemini API for TEXT ONLY translation.
+                    // 4b. Fast-path: same source == target language — no API needed.
+                    if source_lang.as_ref().map(|s| s.0 == target_lang.0).unwrap_or(false) {
+                        let mut cache = cache_arc.lock();
+                        cache.insert(hash, (ocr_text.clone(), ocr_text.clone()));
+                        return Ok(BgResult::Done {
+                            slot_idx: i,
+                            ocr_text: ocr_text.clone(),
+                            translated: ocr_text,
+                            frame_hash: hash,
+                            ocr_lines,
+                        });
+                    }
+
+                    // 4c. Text-level cache: same OCR text seen before → reuse translation.
+                    {
+                        let text_hash = {
+                            let mut h: u64 = 0xcbf29ce484222325;
+                            for b in ocr_text.as_bytes() {
+                                h ^= *b as u64;
+                                h = h.wrapping_mul(0x100000001b3);
+                            }
+                            h
+                        };
+                        // Clone the translation out before releasing the guard
+                        let cached = {
+                            let text_cache = text_cache_arc.lock();
+                            text_cache.get(&text_hash).cloned()
+                        };
+                        if let Some(cached_trans) = cached {
+                            let mut cache = cache_arc.lock();
+                            cache.insert(hash, (ocr_text.clone(), cached_trans.clone()));
+                            return Ok(BgResult::Done {
+                                slot_idx: i,
+                                ocr_text,
+                                translated: cached_trans,
+                                frame_hash: hash,
+                                ocr_lines,
+                            });
+                        }
+                    }
+
+                    // 5. Hit Gemini API for TEXT-ONLY translation.
                     if let Some(g) = &gemini {
                         let translated = g.translate(
                             &ocr_text,
                             source_lang.as_ref(),
                             &target_lang,
                         )?;
-                        
-                        // Save into cache
+
+                        // Save into both caches so we never re-translate the same text.
                         {
-                            let mut cache = cache_arc.lock();
-                            cache.insert(hash, (ocr_text.clone(), translated.clone()));
+                            let text_hash = {
+                                let mut h: u64 = 0xcbf29ce484222325;
+                                for b in ocr_text.as_bytes() {
+                                    h ^= *b as u64;
+                                    h = h.wrapping_mul(0x100000001b3);
+                                }
+                                h
+                            };
+                            let mut frame_cache = cache_arc.lock();
+                            frame_cache.insert(hash, (ocr_text.clone(), translated.clone()));
+                            drop(frame_cache);
+                            let mut text_cache = text_cache_arc.lock();
+                            text_cache.insert(text_hash, translated.clone());
                         }
 
                         Ok(BgResult::Done {
@@ -824,6 +1031,7 @@ impl App {
                             ocr_text,
                             translated,
                             frame_hash: hash,
+                            ocr_lines,
                         })
                     } else {
                         anyhow::bail!("Gemini API key not set — click ⚙ to configure");
@@ -1041,6 +1249,7 @@ impl eframe::App for App {
                     self.slot_busy.push(false);
                     self.slot_processing.push(false);
                     self.last_frame_hash.push(0);
+                    self.overlay_hwnd_cache.push(Arc::new(std::sync::atomic::AtomicIsize::new(0)));
                 }
             });
 
@@ -1056,7 +1265,10 @@ impl eframe::App for App {
                 self.slot_busy.remove(idx);
                 self.slot_processing.remove(idx);
                 self.last_frame_hash.remove(idx);
-                
+                if idx < self.overlay_hwnd_cache.len() {
+                    self.overlay_hwnd_cache.remove(idx);
+                }
+
                 // Re-align Region IDs so they match array index
                 for (i, slot) in model.slots.iter_mut().enumerate() {
                     slot.id.0 = i;

@@ -110,7 +110,10 @@ impl Translator for GeminiTranslator {
             generation_config: Some(GenerationConfig {
                 temperature: Some(0.2),
                 top_p: Some(0.95),
-                max_output_tokens: Some(2048),
+                max_output_tokens: Some(512),
+                // Disable reasoning tokens — translation is deterministic.
+                // Ignored by models that don't support it; saves tokens on 2.5-flash.
+                thinking_config: Some(ThinkingConfig { thinking_budget: 0 }),
             }),
         };
 
@@ -169,6 +172,16 @@ struct GenerationConfig {
     top_p: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<u32>,
+    /// Disable thinking tokens for 2.5-flash models (translation is a
+    /// simple deterministic task — thinking adds cost with no benefit).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking_config: Option<ThinkingConfig>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ThinkingConfig {
+    thinking_budget: u32,
 }
 
 #[derive(Debug, Deserialize)]
