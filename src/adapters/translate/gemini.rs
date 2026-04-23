@@ -91,15 +91,26 @@ impl Translator for GeminiTranslator {
         if self.api_key.trim().is_empty() {
             bail!("Gemini API key is empty (open Settings and set it)");
         }
+        let line_count = text.lines().count();
+        let line_instruction = if line_count > 1 {
+            format!(
+                " The source has exactly {line_count} lines. \
+                 Output exactly {line_count} translated lines in the same order, \
+                 one per line, with no extra blank lines."
+            )
+        } else {
+            String::new()
+        };
+
         let prompt = if let Some(src) = source {
             format!(
-                "Translate from {} to {}. Output ONLY the translation text.\n\n{}",
-                src.0, target.0, text
+                "Translate from {} to {}.{} Output ONLY the translated text, no explanations.\n\n{}",
+                src.0, target.0, line_instruction, text
             )
         } else {
             format!(
-                "Translate to {}. Auto-detect the source language. Output ONLY the translation text.\n\n{}",
-                target.0, text
+                "Translate to {}. Auto-detect the source language.{} Output ONLY the translated text, no explanations.\n\n{}",
+                target.0, line_instruction, text
             )
         };
 
