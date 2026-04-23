@@ -72,7 +72,10 @@ impl WindowsOcr {
         for idx in 0..count {
             let line = lines.GetAt(idx)?;
             let text = line.Text()?.to_string();
-            if text.trim().is_empty() {
+            // Skip noise: empty lines, single chars, or pure punctuation/whitespace.
+            // Manga scans often produce many 1-2 char OCR fragments from artwork.
+            let trimmed = text.trim();
+            if trimmed.len() < 3 || trimmed.chars().all(|c| !c.is_alphanumeric()) {
                 continue;
             }
 

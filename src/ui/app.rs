@@ -718,7 +718,14 @@ impl App {
                         use windows::Win32::Foundation::COLORREF;
                         use windows::Win32::UI::WindowsAndMessaging::{
                             FindWindowW, SetLayeredWindowAttributes, LWA_COLORKEY,
+                            SetWindowDisplayAffinity, WINDOW_DISPLAY_AFFINITY,
                         };
+                        // WDA_EXCLUDEFROMCAPTURE = 0x11: window is visible to the user
+                        // but excluded from screen capture / screenshots APIs. This breaks
+                        // the self-referencing loop where the overlay's own translated text
+                        // was being captured, OCR-read, and re-translated into garbled output.
+                        const WDA_EXCLUDEFROMCAPTURE: WINDOW_DISPLAY_AFFINITY =
+                            WINDOW_DISPLAY_AFFINITY(0x00000011);
                         let title_w: Vec<u16> = format!("Frame Overlay {}\0", slot_id + 1)
                             .encode_utf16()
                             .collect();
@@ -736,6 +743,9 @@ impl App {
                                     0,
                                     LWA_COLORKEY,
                                 );
+                                // Exclude overlay from screen capture so its translated
+                                // text is never captured and fed back into OCR.
+                                let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
                                 hwnd_cache.store(raw, std::sync::atomic::Ordering::Relaxed);
                             }
                         }
@@ -755,6 +765,48 @@ impl App {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64
+    }
+
+    /// Parse a numbered translation response back into a Vec aligned to
+    /// the original OCR lines.
+    ///
+    /// Gemini returns lines like:
+    ///   "1. สวัสดี"
+    ///   "2. เป็นอย่างไร"
+    ///   "3. ฉันสบายดี"
+    ///
+    /// We extract the number and put the text at `result[number - 1]`.
+    /// Any missing numbers get an empty string so positions stay aligned.
+    /// If the response has no numbers at all (single-line or model ignored
+    /// the instruction), fall back to plain line-split.
+    fn parse_numbered_lines(raw: &str, ocr_count: usize) -> Vec<String> {
+        // Detect whether the response uses the numbered format.
+        let has_numbers = raw.lines().any(|l| {
+            let t = l.trim();
+            t.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
+                && t.contains('.')
+        });
+
+        if !has_numbers || ocr_count == 0 {
+            // Plain split fallback
+            return raw.lines().map(|s| s.trim().to_string()).collect();
+        }
+
+        let mut result: Vec<String> = vec![String::new(); ocr_count];
+        for line in raw.lines() {
+            let trimmed = line.trim();
+            // Match "N. text" or "N) text"
+            if let Some(dot) = trimmed.find(|c: char| c == '.' || c == ')') {
+                let idx_str = &trimmed[..dot];
+                if let Ok(idx) = idx_str.trim().parse::<usize>() {
+                    if idx >= 1 && idx <= ocr_count {
+                        let content = trimmed[dot + 1..].trim().to_string();
+                        result[idx - 1] = content;
+                    }
+                }
+            }
+        }
+        result
     }
 
     fn tick_background(&mut self) {
@@ -784,11 +836,11 @@ impl App {
                     if content_changed {
                         slot.last_ocr_text = ocr_text;
                         if !translated.trim().is_empty() {
-                            // Split translation into per-line strings to match OCR positions
-                            slot.last_trans_lines = translated
-                                .lines()
-                                .map(|s| s.to_string())
-                                .collect();
+                            let line_count = ocr_lines.len();
+                            // Parse numbered response ("1. foo\n2. bar") back to
+                            // a Vec aligned to OCR line indices.
+                            slot.last_trans_lines =
+                                Self::parse_numbered_lines(&translated, line_count);
                             slot.last_ocr_lines = ocr_lines;
                             slot.last_translation = translated;
                             slot.pending_text.clear();
