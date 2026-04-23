@@ -840,9 +840,40 @@ impl App {
                     self.slot_busy[slot_idx] = false;
                     self.slot_processing[slot_idx] = false;
                     let now = Self::now_ms();
-                    let mut model = self.model.lock();
-                    model.slots[slot_idx].next_tick_at_ms = now.saturating_add(10_000);
-                    self.last_error = Some(format!("Region {}: {err}", slot_idx + 1));
+
+                    // Parse Gemini retryDelay (e.g. "27s") from 429 responses.
+                    // Fall back to 30 s if not found.
+                    let retry_ms: u64 = {
+                        let re_delay = err
+                            .split('"')
+                            .skip_while(|s| *s != "retryDelay")
+                            .nth(2) // value after key + colon token
+                            .and_then(|s| s.trim_matches(|c: char| !c.is_ascii_digit() && c != '.').parse::<f64>().ok())
+                            .unwrap_or(30.0);
+                        (re_delay * 1000.0) as u64
+                    };
+
+                    {
+                        let mut model = self.model.lock();
+                        model.slots[slot_idx].next_tick_at_ms = now.saturating_add(retry_ms.max(10_000));
+                    }
+
+                    // Reset frame hash so the retry tick actually re-runs OCR+translate
+                    // instead of hitting the Unchanged fast-path.
+                    if slot_idx < self.last_frame_hash.len() {
+                        self.last_frame_hash[slot_idx] = 0;
+                    }
+
+                    // Show a friendly error message instead of raw JSON.
+                    let friendly = if err.contains("429") || err.contains("RESOURCE_EXHAUSTED") {
+                        let secs = retry_ms / 1000;
+                        format!("Region {}: Gemini quota exceeded — retrying in {secs}s", slot_idx + 1)
+                    } else {
+                        // Strip raw JSON body, keep just the first meaningful line
+                        let first_line = err.lines().next().unwrap_or(&err).trim().to_string();
+                        format!("Region {}: {first_line}", slot_idx + 1)
+                    };
+                    self.last_error = Some(friendly);
                 }
             }
         }
