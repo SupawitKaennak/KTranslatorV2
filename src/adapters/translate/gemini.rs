@@ -91,26 +91,44 @@ impl Translator for GeminiTranslator {
         if self.api_key.trim().is_empty() {
             bail!("Gemini API key is empty (open Settings and set it)");
         }
-        let line_count = text.lines().count();
-        let line_instruction = if line_count > 1 {
-            format!(
-                " The source has exactly {line_count} lines. \
-                 Output exactly {line_count} translated lines in the same order, \
-                 one per line, with no extra blank lines."
-            )
+
+        // ── Numbered-line protocol ──────────────────────────────────────────
+        // When the source has multiple lines (one per OCR text-block), we prefix
+        // each line with its 1-based index and ask Gemini to return the same
+        // numbering. This guarantees that the translated line at index N maps to
+        // OCR line N even if Gemini skips or merges some lines.
+        let source_lines: Vec<&str> = text.lines().collect();
+        let (prompt_body, multi_line) = if source_lines.len() > 1 {
+            let numbered = source_lines
+                .iter()
+                .enumerate()
+                .map(|(i, l)| format!("{}. {}", i + 1, l))
+                .collect::<Vec<_>>()
+                .join("\n");
+            (numbered, true)
         } else {
-            String::new()
+            (text.to_string(), false)
+        };
+
+        let line_instruction = if multi_line {
+            " The source is a numbered list of text blocks, one per line. \
+             Return ONLY the translations as a numbered list in the same format \
+             (e.g. '1. translation'). Keep the same numbering. \
+             Do not add explanations or extra lines."
+                .to_string()
+        } else {
+            " Output ONLY the translated text, no explanations.".to_string()
         };
 
         let prompt = if let Some(src) = source {
             format!(
-                "Translate from {} to {}.{} Output ONLY the translated text, no explanations.\n\n{}",
-                src.0, target.0, line_instruction, text
+                "Translate from {} to {}.{}\n\n{}",
+                src.0, target.0, line_instruction, prompt_body
             )
         } else {
             format!(
-                "Translate to {}. Auto-detect the source language.{} Output ONLY the translated text, no explanations.\n\n{}",
-                target.0, line_instruction, text
+                "Translate to {}. Auto-detect the source language.{}\n\n{}",
+                target.0, line_instruction, prompt_body
             )
         };
 
