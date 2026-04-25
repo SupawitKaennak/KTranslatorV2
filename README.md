@@ -85,4 +85,4 @@ To recognize text from other languages (e.g., Japanese, Chinese), you **must** i
 
 ##  License
 
-Copyright (c) 2026 Supawit Kaennak [GPL v3.0](LICENSE). All rights reserved.
+Copyright (c) 2026 Supawit Kaennak [GPL v3.0](LICENSE) . All rights reserved.
