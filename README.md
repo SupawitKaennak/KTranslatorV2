@@ -1,9 +1,9 @@
 # KTranslator V2
 
 A high-performance, real-time screen translator written in Rust.
-A modern, fast, and user-friendly screen translator for Windows. This tool uses **Offline Windows OCR** for text recognition and **Google Gemini AI** for high-quality, context-aware translation.
 
 <img width="559" height="333" alt="{C93780CF-C104-4925-8ECD-1726E73F654D}" src="https://github.com/user-attachments/assets/6855e97f-9d64-4574-a113-ede638fd1443" /><!-- Use your generate_image tool or capture a real one if needed, but for now placeholder is fine if I don't have a final capture -->
+<img width="562" height="332" alt="{A77DBB38-1A99-4DB6-A647-D0B3F0C39459}" src="https://github.com/user-attachments/assets/2efd1545-468b-4e9b-9f83-df0c20280ae4" />
 
 ## ✨ Features
 
