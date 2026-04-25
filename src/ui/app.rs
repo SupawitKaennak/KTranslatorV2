@@ -7,14 +7,18 @@ use crate::{
     adapters::{
         capture::screenshots_capture::ScreenshotsCapture,
         ocr::windows_ocr::WindowsOcr,
-        translate::gemini::{GeminiModel, GeminiTranslator},
+        translate::{
+            gemini::{GeminiModel, GeminiTranslator},
+            groq::GroqTranslator,
+            ollama::OllamaTranslator,
+        },
     },
     core::{
         model::AppModel,
         ports::{FrameSource, OcrTextLine, Translator},
         types::{LanguageTag, Rect},
     },
-    infra::settings::{load_settings, save_settings, Settings},
+    infra::settings::{load_settings, save_settings, Settings, TranslationProvider},
     ui::crop_overlay::{run_crop_viewport, CropOutcome, CropOverlayState},
 };
 
@@ -114,8 +118,8 @@ pub struct App {
     /// Local OCR engine (Offline)
     windows_ocr: Arc<WindowsOcr>,
 
-    /// Text-only translator via Gemini API
-    gemini_translator: Option<Arc<GeminiTranslator>>,
+    /// Text-only translator via selected provider (Gemini/Groq/Ollama)
+    translator: Option<Arc<dyn Translator>>,
 
     // Background processing
     bg_tx: mpsc::Sender<BgResult>,
@@ -145,41 +149,82 @@ pub struct App {
     /// overlay mode toggle, or any other event that causes egui to recreate the child window.
     /// 0 = not yet found.
     overlay_hwnd_cache: Vec<Arc<std::sync::atomic::AtomicIsize>>,
+
+    /// Last known (source_lang, target_lang) per slot.
+    /// When this changes we invalidate caches and reset frame hash to force retranslation.
+    slot_last_langs: Vec<(Option<String>, String)>,
 }
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // ── Register Thai font so egui can render ภาษาไทย ──
+        // ── Font setup: multi-script support ─────────────────────────────
+        // egui's default fonts cover Latin, Cyrillic, and Greek.
+        // We add the following fallbacks so every translated script renders:
+        //   • Thai          → NotoSansThai (embedded, guaranteed)
+        //   • CJK           → Microsoft YaHei / MS Gothic / Malgun Gothic (Windows system)
+        //   • Arabic/Hebrew → Arial / Tahoma (Windows system)
+        //   • Devanagari    → Nirmala UI / Mangal (Windows system)
         let mut fonts = egui::FontDefinitions::default();
+
+        // 1. Embedded Thai font (always available)
         fonts.font_data.insert(
             "noto_sans_thai".to_owned(),
             Arc::new(egui::FontData::from_static(include_bytes!(
                 "../../assets/NotoSansThai.ttf"
             ))),
         );
-        // Add as fallback for both proportional and monospace families
-        if let Some(family) = fonts
-            .families
-            .get_mut(&egui::FontFamily::Proportional)
-        {
-            family.push("noto_sans_thai".to_owned());
+
+        // 2. Windows system fonts loaded at runtime
+        //    We try each path; missing fonts are silently skipped.
+        let system_fonts: &[(&str, &str)] = &[
+            // CJK — Chinese (Simplified), Japanese, Korean
+            ("msyh",    r"C:\Windows\Fonts\msyh.ttc"),     // Microsoft YaHei  (zh)
+            ("msyh",    r"C:\Windows\Fonts\msyhbd.ttc"),
+            ("msgoth",  r"C:\Windows\Fonts\msgothic.ttc"),  // MS Gothic         (ja)
+            ("malgun",  r"C:\Windows\Fonts\malgun.ttf"),    // Malgun Gothic     (ko)
+            ("malgunbd",r"C:\Windows\Fonts\malgunbd.ttf"),
+            // Arabic, Hebrew, and wide Latin coverage
+            ("arial",   r"C:\Windows\Fonts\arial.ttf"),
+            ("tahoma",  r"C:\Windows\Fonts\tahoma.ttf"),
+            // Devanagari (Hindi, Nepali, Marathi) + other South-Asian scripts
+            ("nirmala", r"C:\Windows\Fonts\Nirmala.ttf"),
+            ("nirmalab",r"C:\Windows\Fonts\NirmalaB.ttf"),
+            ("mangal",  r"C:\Windows\Fonts\mangal.ttf"),
+            // Fallback Unicode catch-all (Office installs)
+            ("arialuni",r"C:\Windows\Fonts\ARIALUNI.TTF"),
+        ];
+
+        let mut loaded: Vec<String> = Vec::new();
+        for (key, path) in system_fonts {
+            if loaded.contains(&key.to_string()) {
+                continue; // skip duplicate keys
+            }
+            if let Ok(data) = std::fs::read(path) {
+                fonts.font_data.insert(
+                    (*key).to_owned(),
+                    Arc::new(egui::FontData::from_owned(data)),
+                );
+                loaded.push(key.to_string());
+            }
         }
-        if let Some(family) = fonts
-            .families
-            .get_mut(&egui::FontFamily::Monospace)
-        {
-            family.push("noto_sans_thai".to_owned());
+
+        // 3. Register all fonts as fallbacks (Thai first, then system fonts)
+        let fallback_order = {
+            let mut v = vec!["noto_sans_thai".to_owned()];
+            v.extend(loaded.iter().cloned());
+            v
+        };
+        for family_key in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            if let Some(family) = fonts.families.get_mut(&family_key) {
+                family.extend(fallback_order.clone());
+            }
         }
+
         cc.egui_ctx.set_fonts(fonts);
 
         let settings = load_settings().unwrap_or_default();
 
-        let gemini_translator = GeminiTranslator::new(
-            settings.gemini_api_key.clone(),
-            settings.gemini_model.clone(),
-        )
-        .ok()
-        .map(Arc::new);
+        let translator = Self::create_translator(&settings);
 
         let (bg_tx, bg_rx) = mpsc::channel();
 
@@ -214,7 +259,7 @@ impl App {
             crop_finish: Arc::new(Mutex::new(None)),
             capture: Arc::new(ScreenshotsCapture),
             windows_ocr: Arc::new(WindowsOcr::new()),
-            gemini_translator,
+            translator,
             bg_tx,
             bg_rx,
             slot_busy: vec![false],
@@ -237,6 +282,7 @@ impl App {
             translation_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
             text_translation_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
             overlay_hwnd_cache: vec![Arc::new(std::sync::atomic::AtomicIsize::new(0))],
+            slot_last_langs: vec![(None, String::new())],
         }
     }
 
@@ -283,12 +329,60 @@ impl App {
 
     fn language_options() -> Vec<(&'static str, &'static str)> {
         vec![
-            ("Auto", ""),
-            ("English (en)", "en"),
-            ("Thai (th)", "th"),
-            ("Japanese (ja)", "ja"),
-            ("Chinese (zh)", "zh"),
-            ("Korean (ko)", "ko"),
+            // ── Detection ─────────────────────────────────────────────────
+            ("Auto-detect", ""),
+            // ── East / Southeast Asia ──────────────────────────────────────
+            ("Chinese Simplified (zh-Hans)", "zh-Hans"),
+            ("Chinese Traditional (zh-Hant)", "zh-Hant"),
+            ("Japanese (ja)",                 "ja"),
+            ("Korean (ko)",                   "ko"),
+            ("Thai (th)",                     "th"),
+            ("Vietnamese (vi)",               "vi"),
+            ("Indonesian (id)",               "id"),
+            ("Malay (ms)",                    "ms"),
+            ("Filipino / Tagalog (fil)",      "fil"),
+            ("Burmese (my)",                  "my"),
+            ("Khmer (km)",                    "km"),
+            ("Lao (lo)",                      "lo"),
+            // ── South Asia ────────────────────────────────────────────────
+            ("Hindi (hi)",                    "hi"),
+            ("Bengali (bn)",                  "bn"),
+            ("Tamil (ta)",                    "ta"),
+            ("Telugu (te)",                   "te"),
+            ("Urdu (ur)",                     "ur"),
+            ("Nepali (ne)",                   "ne"),
+            ("Sinhala (si)",                  "si"),
+            // ── Middle East / Central Asia ────────────────────────────────
+            ("Arabic (ar)",                   "ar"),
+            ("Persian / Farsi (fa)",          "fa"),
+            ("Turkish (tr)",                  "tr"),
+            ("Hebrew (he)",                   "he"),
+            // ── Europe — Western ──────────────────────────────────────────
+            ("English (en)",                  "en"),
+            ("French (fr)",                   "fr"),
+            ("German (de)",                   "de"),
+            ("Spanish (es)",                  "es"),
+            ("Portuguese (pt)",               "pt"),
+            ("Italian (it)",                  "it"),
+            ("Dutch (nl)",                    "nl"),
+            ("Swedish (sv)",                  "sv"),
+            ("Norwegian (no)",                "no"),
+            ("Danish (da)",                   "da"),
+            ("Finnish (fi)",                  "fi"),
+            ("Polish (pl)",                   "pl"),
+            ("Romanian (ro)",                 "ro"),
+            ("Czech (cs)",                    "cs"),
+            ("Hungarian (hu)",                "hu"),
+            ("Greek (el)",                    "el"),
+            // ── Europe — Eastern / Cyrillic ───────────────────────────────
+            ("Russian (ru)",                  "ru"),
+            ("Ukrainian (uk)",                "uk"),
+            ("Bulgarian (bg)",                "bg"),
+            ("Serbian (sr)",                  "sr"),
+            ("Croatian (hr)",                 "hr"),
+            // ── Americas / African ────────────────────────────────────────
+            ("Swahili (sw)",                  "sw"),
+            ("Afrikaans (af)",                "af"),
         ]
     }
 
@@ -760,6 +854,28 @@ impl App {
     // Background processing: capture → compare → OCR+Translate (if changed)
     // -----------------------------------------------------------------------
 
+    fn create_translator(settings: &Settings) -> Option<Arc<dyn Translator>> {
+        match settings.provider {
+            TranslationProvider::Gemini => GeminiTranslator::new(
+                settings.gemini_api_key.clone(),
+                settings.gemini_model.clone(),
+            )
+            .ok()
+            .map(|t| Arc::new(t) as Arc<dyn Translator>),
+            TranslationProvider::Groq => {
+                GroqTranslator::new(settings.groq_api_key.clone(), settings.groq_model.clone())
+                    .ok()
+                    .map(|t| Arc::new(t) as Arc<dyn Translator>)
+            }
+            TranslationProvider::Ollama => OllamaTranslator::new(
+                settings.ollama_url.clone(),
+                settings.ollama_model.clone(),
+            )
+            .ok()
+            .map(|t| Arc::new(t) as Arc<dyn Translator>),
+        }
+    }
+
     fn now_ms() -> u64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -943,6 +1059,32 @@ impl App {
                 continue;
             }
 
+            // ── Language-change detection ────────────────────────────────
+            // Grow tracking vec to match slot count (slots can be added at runtime)
+            if self.slot_last_langs.len() <= i {
+                self.slot_last_langs.resize(i + 1, (None, String::new()));
+            }
+            let cur_src = slot.source_lang.as_ref().map(|l| l.0.clone());
+            let cur_tgt = slot.target_lang.0.clone();
+            let lang_changed = self.slot_last_langs[i] != (cur_src.clone(), cur_tgt.clone());
+            if lang_changed {
+                self.slot_last_langs[i] = (cur_src, cur_tgt);
+                // Reset frame hash → next tick will bypass Unchanged fast-path
+                if i < self.last_frame_hash.len() {
+                    self.last_frame_hash[i] = 0;
+                }
+                // Evict stale translation from frame cache for this slot
+                self.translation_cache.lock().clear();
+                // Flush text cache — translations are language-pair specific
+                self.text_translation_cache.lock().clear();
+                // Clear overlay so old-language text disappears immediately
+                if let Some(m_slot) = self.model.lock().slots.get_mut(i) {
+                    m_slot.last_trans_lines.clear();
+                    m_slot.last_ocr_lines.clear();
+                    m_slot.last_translation.clear();
+                }
+            }
+
             if self.slot_busy[i] || now < slot.next_tick_at_ms {
                 continue;
             }
@@ -960,7 +1102,7 @@ impl App {
             let target_lang = slot.target_lang.clone();
             let capture = self.capture.clone();
             let windows_ocr = self.windows_ocr.clone();
-            let gemini = self.gemini_translator.clone();
+            let translator = self.translator.clone();
             let tx = self.bg_tx.clone();
             let prev_hash = self.last_frame_hash[i];
 
@@ -1084,13 +1226,10 @@ impl App {
                         }
                     }
 
-                    // 5. Hit Gemini API for TEXT-ONLY translation.
-                    if let Some(g) = &gemini {
-                        let translated = g.translate(
-                            &ocr_text,
-                            source_lang.as_ref(),
-                            &target_lang,
-                        )?;
+                    // 5. Hit Translation API for TEXT-ONLY translation.
+                    if let Some(t) = &translator {
+                        let translated =
+                            t.translate(&ocr_text, source_lang.as_ref(), &target_lang)?;
 
                         // Save into both caches so we never re-translate the same text.
                         {
@@ -1159,65 +1298,109 @@ impl App {
         egui::Window::new("Settings")
             .open(&mut open)
             .show(ctx, |ui| {
-                ui.label("Gemini (API key)");
                 ui.horizontal(|ui| {
-                    ui.label("model");
-                    let choices = self.model_choices();
-                    let mut current_idx = choices
-                        .iter()
-                        .position(|m| m.id == self.settings.gemini_model)
-                        .unwrap_or(0);
-                    egui::ComboBox::from_id_salt("gemini_model_dropdown")
-                        .width(280.0)
-                        .selected_text(
-                            choices
-                                .get(current_idx)
-                                .map(|m| m.display_name.as_str())
-                                .unwrap_or(self.settings.gemini_model.as_str()),
-                        )
-                        .show_ui(ui, |ui| {
-                            for (i, m) in choices.iter().enumerate() {
-                                ui.selectable_value(&mut current_idx, i, &m.display_name);
-                            }
-                        });
-                    if let Some(sel) = choices.get(current_idx) {
-                        self.settings.gemini_model = sel.id.clone();
-                    }
-                    if ui.button("Refresh").clicked() {
-                        match GeminiTranslator::list_models(&self.settings.gemini_api_key) {
-                            Ok(models) => {
-                                self.gemini_models = models;
-                                self.last_error = None;
-                            }
-                            Err(e) => self.last_error = Some(format!("{e:#}")),
-                        }
-                    }
-                });
-                ui.horizontal(|ui| {
-                    ui.label("");
-                    ui.small(
-                        "Pick from list (built-in until Refresh loads your account's models).",
+                    ui.label("Provider:");
+                    ui.selectable_value(
+                        &mut self.settings.provider,
+                        TranslationProvider::Gemini,
+                        "Gemini",
                     );
-                });
-                ui.horizontal(|ui| {
-                    ui.label("api_key");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.settings.gemini_api_key)
-                            .password(true),
+                    ui.selectable_value(
+                        &mut self.settings.provider,
+                        TranslationProvider::Groq,
+                        "Groq",
+                    );
+                    ui.selectable_value(
+                        &mut self.settings.provider,
+                        TranslationProvider::Ollama,
+                        "Ollama (Offline)",
                     );
                 });
                 ui.separator();
-                if ui.button("Save").clicked() {
+
+                match self.settings.provider {
+                    TranslationProvider::Gemini => {
+                        ui.label("Gemini (API key)");
+                        ui.horizontal(|ui| {
+                            ui.label("model");
+                            let choices = self.model_choices();
+                            let mut current_idx = choices
+                                .iter()
+                                .position(|m| m.id == self.settings.gemini_model)
+                                .unwrap_or(0);
+                            egui::ComboBox::from_id_salt("gemini_model_dropdown")
+                                .width(250.0)
+                                .selected_text(
+                                    choices
+                                        .get(current_idx)
+                                        .map(|m| m.display_name.as_str())
+                                        .unwrap_or(self.settings.gemini_model.as_str()),
+                                )
+                                .show_ui(ui, |ui| {
+                                    for (i, m) in choices.iter().enumerate() {
+                                        ui.selectable_value(&mut current_idx, i, &m.display_name);
+                                    }
+                                });
+                            if let Some(sel) = choices.get(current_idx) {
+                                self.settings.gemini_model = sel.id.clone();
+                            }
+                            if ui.button("Refresh").clicked() {
+                                match GeminiTranslator::list_models(&self.settings.gemini_api_key) {
+                                    Ok(models) => {
+                                        self.gemini_models = models;
+                                        self.last_error = None;
+                                    }
+                                    Err(e) => self.last_error = Some(format!("{e:#}")),
+                                }
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("api_key");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.settings.gemini_api_key)
+                                    .password(true),
+                            );
+                        });
+                    }
+                    TranslationProvider::Groq => {
+                        ui.label("Groq (High speed, Free)");
+                        ui.horizontal(|ui| {
+                            ui.label("model");
+                            ui.text_edit_singleline(&mut self.settings.groq_model);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("api_key");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.settings.groq_api_key)
+                                    .password(true),
+                            );
+                        });
+                        ui.hyperlink_to("Get Groq API Key", "https://console.groq.com/keys");
+                    }
+                    TranslationProvider::Ollama => {
+                        ui.label("Ollama (Local/Offline)");
+                        ui.horizontal(|ui| {
+                            ui.label("Server URL");
+                            ui.text_edit_singleline(&mut self.settings.ollama_url);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Model Name");
+                            ui.text_edit_singleline(&mut self.settings.ollama_model);
+                        });
+                        ui.small(
+                            "Make sure Ollama is running and you have run 'ollama pull <model>'",
+                        );
+                    }
+                }
+
+                ui.add_space(8.0);
+                ui.separator();
+                if ui.button("Save & Apply").clicked() {
                     if let Err(e) = save_settings(&self.settings) {
                         self.last_error = Some(format!("{e:#}"));
                     } else {
-                        // Recreate the translator adapter with new key/model
-                        self.gemini_translator = GeminiTranslator::new(
-                            self.settings.gemini_api_key.clone(),
-                            self.settings.gemini_model.clone(),
-                        )
-                        .ok()
-                        .map(Arc::new);
+                        // Recreate the translator adapter with new settings
+                        self.translator = Self::create_translator(&self.settings);
                         self.last_error = None;
                     }
                 }
