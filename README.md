@@ -39,22 +39,34 @@ A high-performance, real-time screen translator written in Rust.
 
 ## 📖 How to Use
 
-1. **Configure Translation Provider:**
-   - Click the ⚙ (Gear) icon in the top right.
-   - Choose your **Provider** (Gemini, Groq, or Ollama).
-   - Enter your API Key or Server URL and select/type the model name.
-   - **Recommended Models:**
-     - Gemini: `gemini-2.0-flash`
-     - Groq: `llama-3.3-70b-versatile`
-     - Ollama: `llama3.2:1b` (fast) or `gemma2:2b` (better Thai)
-   - Click **Save & Apply**.
-2. **Add a Translation Region:**
-   - Click **➕ Add Region**.
-   - Click **Select Area** to drag and select the part of the screen you want to watch.
-3. **Translate:**
-   - Set the **From** (Source) and **To** (Target) languages.
-   - Toggle **Active** via the Start/Stop button at the top.
-   - Enable **📺 Overlay Mode** to see translated text in-place.
+### 1. Prepare Windows OCR (Crucial)
+To recognize text from other languages (e.g., Japanese, Chinese), you **must** install the corresponding Windows Language Pack:
+1. Open **Windows Settings** > **Time & Language** > **Language & region**.
+2. Click **Add a language**.
+3. Search for the language you want to translate **FROM** (e.g., Japanese).
+4. Ensure the **"Optical Character Recognition"** feature is checked during installation.
+
+### 2. Configure Translation Provider
+1. Open the app and click the **⚙ (Gear)** icon in the top right.
+2. Select your preferred **Provider**:
+   - **Gemini:** Great all-rounder. Requires API Key from [AI Studio](https://aistudio.google.com/).
+   - **Groq:** Ultra-fast. Use `llama-3.3-70b-versatile` for best quality. API Key from [Groq Console](https://console.groq.com/).
+   - **Ollama:** Offline mode. Run `ollama run llama3.2:1b` in your terminal first.
+3. Click **Save & Apply**.
+
+### 3. Start Translating
+1. Click **➕ Add Region** in the main window.
+2. Click **Select Area** — your screen will dim. Drag your mouse to select the area you want to translate.
+3. Set **From** (Source language) and **To** (Target language).
+   - *Note: Auto-detect works best with Gemini/Groq.*
+4. Click the **▶ Start** button at the top.
+5. **📺 Overlay Mode:** Toggle this to see translated text appear directly on top of the original text. You can interact with windows behind the overlay normally.
+
+## ❓ Troubleshooting
+
+- **Text appears as boxes (□):** The app tries to load system fonts automatically, but you might be missing specific script support. Ensure you have the corresponding Windows font installed.
+- **Ollama Error:** Ensure the Ollama server is running (check your system tray) and you have "pulled" the model using `ollama pull <model_name>`.
+- **OCR not recognizing text:** Double-check that the source language matches the installed Windows Language Pack (Step 1).
 
 ## 🛠️ Tech Stack
 
