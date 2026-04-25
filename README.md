@@ -15,7 +15,8 @@ A high-performance, real-time screen translator written in Rust.
 - **Positional Overlay:** Renders translated text directly over the original text on your screen with perfect alignment.
 - **Smart Debounce:** Only translates when the screen content is stable to save API quota and prevent flickering.
 - **Multilingual Support:** Supports 50+ world languages with automatic font fallback for Thai, CJK, Arabic, and more.
-- **Exclusion Capture:** Overlay windows are automatically excluded from capture to prevent feedback loops.
+- **Exclusion Capture:** Overlay windows are automatically excluded from capture to prevent feedback loops.<br>
+<img width="563" height="336" alt="{E8220A9A-EEF3-41B1-B523-75EBF029AC23}" src="https://github.com/user-attachments/assets/6517f66f-a38b-4988-8c50-7c17a833b5f6" />
 
 ## 🛠️ Prerequisites
 
