@@ -3,18 +3,35 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::{fs, path::PathBuf};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TranslationProvider {
+    Gemini,
+    Groq,
+    Ollama,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
+    pub provider: TranslationProvider,
     pub gemini_api_key: String,
     pub gemini_model: String,
+    pub groq_api_key: String,
+    pub groq_model: String,
+    pub ollama_url: String,
+    pub ollama_model: String,
     pub dark_mode: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            provider: TranslationProvider::Gemini,
             gemini_api_key: String::new(),
             gemini_model: "gemini-2.0-flash".to_string(),
+            groq_api_key: String::new(),
+            groq_model: "llama-3.3-70b-versatile".to_string(),
+            ollama_url: "http://localhost:11434".to_string(),
+            ollama_model: "llama3.2:1b".to_string(),
             dark_mode: true,
         }
     }
