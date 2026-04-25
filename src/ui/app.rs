@@ -544,10 +544,9 @@ impl App {
             let mut model = self.model.lock();
             let slot = &mut model.slots[slot_idx];
 
-            if !slot.last_translation.is_empty() {
-                ui.label(egui::RichText::new("Translated Text:").strong());
-                ui.label(&slot.last_translation);
-            } else if self.slot_processing[slot_idx] {
+            // Translation display removed from main UI as requested.
+            // Users can see it in Popup or Overlay Mode.
+            if self.slot_processing[slot_idx] {
                 ui.horizontal(|ui| {
                     ui.spinner();
                     ui.label("Thinking...");
@@ -605,11 +604,13 @@ impl App {
                         }
                         ui.separator();
                         ui.label("Translation:");
-                        ui.monospace(if slot.last_translation.is_empty() {
-                            "(waiting...)"
+                        if slot.last_trans_lines.is_empty() {
+                            ui.monospace("(waiting...)");
                         } else {
-                            &slot.last_translation
-                        });
+                            for line in &slot.last_trans_lines {
+                                ui.label(line);
+                            }
+                        }
                     };
 
                     if matches!(class, egui::ViewportClass::Embedded) {
