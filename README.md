@@ -5,7 +5,7 @@ A high-performance, real-time screen translator written in Rust.
 <img width="559" height="333" alt="{C93780CF-C104-4925-8ECD-1726E73F654D}" src="https://github.com/user-attachments/assets/6855e97f-9d64-4574-a113-ede638fd1443" /><br><!-- Use your generate_image tool or capture a real one if needed, but for now placeholder is fine if I don't have a final capture -->
 <img width="562" height="332" alt="{A77DBB38-1A99-4DB6-A647-D0B3F0C39459}" src="https://github.com/user-attachments/assets/2efd1545-468b-4e9b-9f83-df0c20280ae4" />
 
-## ✨ Features
+##  Features
 
 - **Real-time Translation:** Captures screen regions and translates text instantly.
 - **Multi-Provider Support:**
@@ -18,7 +18,7 @@ A high-performance, real-time screen translator written in Rust.
 - **Exclusion Capture:** Overlay windows are automatically excluded from capture to prevent feedback loops.<br>
 <img width="563" height="336" alt="{E8220A9A-EEF3-41B1-B523-75EBF029AC23}" src="https://github.com/user-attachments/assets/6517f66f-a38b-4988-8c50-7c17a833b5f6" />
 
-## 🛠️ Prerequisites
+##  Prerequisites
 
 - **Windows:** Currently supports Windows 10/11 (uses native Windows OCR).
 - **Language Packs:** Ensure you have the Windows Language Pack installed for the languages you want to translate FROM (check Windows Settings > Time & Language > Language).
@@ -28,7 +28,7 @@ A high-performance, real-time screen translator written in Rust.
   - [Groq Console](https://console.groq.com/) for Groq.
 - **Ollama (Optional):** [Download Ollama](https://ollama.com/) if you want to use offline translation.
 
-## 🚀 Installation & Running
+##  Installation & Running
 
 1. **Clone the repository:**
    ```bash
@@ -41,7 +41,7 @@ A high-performance, real-time screen translator written in Rust.
    cargo run --release
    ```
 
-## 📖 How to Use
+##  How to Use
 
 ### 1. Prepare Windows OCR (Crucial)
 To recognize text from other languages (e.g., Japanese, Chinese), you **must** install the corresponding Windows Language Pack:
@@ -66,13 +66,13 @@ To recognize text from other languages (e.g., Japanese, Chinese), you **must** i
 4. Click the **▶ Start** button at the top.
 5. **📺 Overlay Mode:** Toggle this to see translated text appear directly on top of the original text. You can interact with windows behind the overlay normally.
 
-## ❓ Troubleshooting
+##  Troubleshooting
 
 - **Text appears as boxes (□):** The app tries to load system fonts automatically, but you might be missing specific script support. Ensure you have the corresponding Windows font installed.
 - **Ollama Error:** Ensure the Ollama server is running (check your system tray) and you have "pulled" the model using `ollama pull <model_name>`.
 - **OCR not recognizing text:** Double-check that the source language matches the installed Windows Language Pack (Step 1).
 
-## 🛠️ Tech Stack
+##  Tech Stack
 
 - **UI Framework:** [egui](https://github.com/emilk/egui) with `eframe`.
 - **OCR:** Native Windows.Media.Ocr (via the `windows` crate).
@@ -83,6 +83,6 @@ To recognize text from other languages (e.g., Japanese, Chinese), you **must** i
 - **Capture:** `screenshots` crate with custom stabilization logic.
 - **Graphics:** Raw Win32 API for transparent overlay window management.
 
-## 📄 License
+##  License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+Copyright (c) 2026 Supawit Kaennak. All rights reserved.
