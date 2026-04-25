@@ -1,9 +1,9 @@
 # KTranslator V2
 
 A high-performance, real-time screen translator written in Rust.
-A modern, fast, and user-friendly screen translator for Windows. This tool uses **Offline Windows OCR** for text recognition and **Google Gemini AI** for high-quality, context-aware translation.
 
-<img width="559" height="333" alt="{C93780CF-C104-4925-8ECD-1726E73F654D}" src="https://github.com/user-attachments/assets/6855e97f-9d64-4574-a113-ede638fd1443" /><!-- Use your generate_image tool or capture a real one if needed, but for now placeholder is fine if I don't have a final capture -->
+<img width="559" height="333" alt="{C93780CF-C104-4925-8ECD-1726E73F654D}" src="https://github.com/user-attachments/assets/6855e97f-9d64-4574-a113-ede638fd1443" /><br><!-- Use your generate_image tool or capture a real one if needed, but for now placeholder is fine if I don't have a final capture -->
+<img width="562" height="332" alt="{A77DBB38-1A99-4DB6-A647-D0B3F0C39459}" src="https://github.com/user-attachments/assets/2efd1545-468b-4e9b-9f83-df0c20280ae4" />
 
 ## ✨ Features
 
@@ -15,7 +15,8 @@ A modern, fast, and user-friendly screen translator for Windows. This tool uses 
 - **Positional Overlay:** Renders translated text directly over the original text on your screen with perfect alignment.
 - **Smart Debounce:** Only translates when the screen content is stable to save API quota and prevent flickering.
 - **Multilingual Support:** Supports 50+ world languages with automatic font fallback for Thai, CJK, Arabic, and more.
-- **Exclusion Capture:** Overlay windows are automatically excluded from capture to prevent feedback loops.
+- **Exclusion Capture:** Overlay windows are automatically excluded from capture to prevent feedback loops.<br>
+<img width="563" height="336" alt="{E8220A9A-EEF3-41B1-B523-75EBF029AC23}" src="https://github.com/user-attachments/assets/6517f66f-a38b-4988-8c50-7c17a833b5f6" />
 
 ## 🛠️ Prerequisites
 
