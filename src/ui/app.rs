@@ -1131,7 +1131,7 @@ impl App {
                     // Show a friendly error message instead of raw JSON.
                     let friendly = if err.contains("429") || err.contains("RESOURCE_EXHAUSTED") {
                         let secs = retry_ms / 1000;
-                        format!("Region {}: Gemini quota exceeded — retrying in {secs}s", slot_idx + 1)
+                        format!("Region {}: API quota exceeded — retrying in {secs}s", slot_idx + 1)
                     } else {
                         // Strip raw JSON body, keep just the first meaningful line
                         let first_line = err.lines().next().unwrap_or(&err).trim().to_string();
@@ -1454,7 +1454,7 @@ impl App {
                             ocr_lines,
                         })
                     } else {
-                        anyhow::bail!("Gemini API key not set — click ⚙ to configure");
+                        anyhow::bail!("Translation provider not configured or API key missing — click ⚙ to check settings");
                     }
                 })();
 
