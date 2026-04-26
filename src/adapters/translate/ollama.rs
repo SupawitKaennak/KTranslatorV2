@@ -104,7 +104,10 @@ impl Translator for OllamaTranslator {
                 },
             ],
             stream: false,
-            options: Some(OllamaOptions { temperature: 0.2 }),
+            options: Some(OllamaOptions {
+                temperature: 0.2,
+                num_predict: 4096,
+            }),
         };
 
         let endpoint = format!("{}/api/chat", self.url);
@@ -143,6 +146,7 @@ struct OllamaMessage {
 #[derive(Serialize)]
 struct OllamaOptions {
     temperature: f32,
+    num_predict: u32,
 }
 
 #[derive(Deserialize)]

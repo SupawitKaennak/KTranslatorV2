@@ -108,7 +108,7 @@ impl Translator for GroqTranslator {
                 },
             ],
             temperature: 0.2,
-            max_tokens: 512,
+            max_tokens: 4096,
         };
 
         let resp = self.client
