@@ -15,7 +15,7 @@ use crate::{
     },
     core::{
         model::AppModel,
-        ports::{FrameSource, OcrTextLine, Translator},
+        ports::{FrameRgba, FrameSource, OcrTextLine, Translator},
         types::{LanguageTag, Rect},
     },
     infra::settings::{load_settings, save_settings, Settings, TranslationProvider},
@@ -540,9 +540,6 @@ impl App {
             ui.add_space(4.0);
             ui.separator();
             ui.add_space(4.0);
-
-            let mut model = self.model.lock();
-            let slot = &mut model.slots[slot_idx];
 
             // Translation display removed from main UI as requested.
             // Users can see it in Popup or Overlay Mode.
@@ -1123,24 +1120,11 @@ impl App {
 
             std::thread::spawn(move || {
                 let result = (|| -> anyhow::Result<BgResult> {
-                    let mut frame = capture.capture_rect(rect, display_id)?;
+                    let frame = capture.capture_rect(rect, display_id)?;
 
                     // Hash BEFORE thresholding so the debounce reflects actual screen
                     // content changes rather than BW post-processing artifacts.
                     let hash = smart_hash(&frame.data);
-
-                    // Apply Black & White Thresholding for local OCR accuracy.
-                    for chunk in frame.data.chunks_exact_mut(4) {
-                        let r = chunk[0] as f32;
-                        let g = chunk[1] as f32;
-                        let b = chunk[2] as f32;
-                        let lum = 0.299 * r + 0.587 * g + 0.114 * b;
-                        let val = if lum > 128.0 { 255 } else { 0 };
-                        chunk[0] = val;
-                        chunk[1] = val;
-                        chunk[2] = val;
-                        chunk[3] = 255;
-                    }
 
                     // 1. Debounce state machine (Visual stability)
                     if hash != stable_hash {
@@ -1173,14 +1157,110 @@ impl App {
                     // Signal heavy work starting (triggers UI spinner)
                     let _ = tx.send(BgResult::Translating { slot_idx: i });
 
+                    // ── Image Pre-processing for OCR ───────────────────────
+                    // Step A: 2x Upscale (bilinear interpolation) — makes
+                    // small or stylised manga fonts much easier for the OCR
+                    // engine to recognise.
+                    let scale = 2u32;
+                    let new_w = frame.width * scale;
+                    let new_h = frame.height * scale;
+                    let mut upscaled = vec![0u8; (new_w * new_h * 4) as usize];
+                    for dst_y in 0..new_h {
+                        for dst_x in 0..new_w {
+                            // Map destination pixel to source (fractional)
+                            let src_xf = dst_x as f32 / scale as f32;
+                            let src_yf = dst_y as f32 / scale as f32;
+                            let x0 = (src_xf as u32).min(frame.width - 1);
+                            let y0 = (src_yf as u32).min(frame.height - 1);
+                            let x1 = (x0 + 1).min(frame.width - 1);
+                            let y1 = (y0 + 1).min(frame.height - 1);
+                            let fx = src_xf - x0 as f32;
+                            let fy = src_yf - y0 as f32;
+                            let idx = |x: u32, y: u32| (y * frame.width + x) as usize * 4;
+                            let dst_idx = (dst_y * new_w + dst_x) as usize * 4;
+                            for c in 0..4 {
+                                let v00 = frame.data[idx(x0, y0) + c] as f32;
+                                let v10 = frame.data[idx(x1, y0) + c] as f32;
+                                let v01 = frame.data[idx(x0, y1) + c] as f32;
+                                let v11 = frame.data[idx(x1, y1) + c] as f32;
+                                let top = v00 + (v10 - v00) * fx;
+                                let bot = v01 + (v11 - v01) * fx;
+                                upscaled[dst_idx + c] = (top + (bot - top) * fy) as u8;
+                            }
+                        }
+                    }
+
+                    // Step B: Adaptive Binarization (Otsu-style global threshold)
+                    // Compute a luminance histogram and pick the optimal split.
+                    let mut histogram = [0u32; 256];
+                    let pixel_count = (new_w * new_h) as usize;
+                    for chunk in upscaled.chunks_exact(4) {
+                        let lum = (0.299 * chunk[0] as f32
+                            + 0.587 * chunk[1] as f32
+                            + 0.114 * chunk[2] as f32) as u8;
+                        histogram[lum as usize] += 1;
+                    }
+                    // Otsu's method
+                    let total = pixel_count as f64;
+                    let mut sum_total: f64 = 0.0;
+                    for (i, &count) in histogram.iter().enumerate() {
+                        sum_total += i as f64 * count as f64;
+                    }
+                    let mut sum_bg: f64 = 0.0;
+                    let mut weight_bg: f64 = 0.0;
+                    let mut max_variance: f64 = 0.0;
+                    let mut threshold: u8 = 128;
+                    for (i, &count) in histogram.iter().enumerate() {
+                        weight_bg += count as f64;
+                        if weight_bg == 0.0 { continue; }
+                        let weight_fg = total - weight_bg;
+                        if weight_fg == 0.0 { break; }
+                        sum_bg += i as f64 * count as f64;
+                        let mean_bg = sum_bg / weight_bg;
+                        let mean_fg = (sum_total - sum_bg) / weight_fg;
+                        let variance = weight_bg * weight_fg * (mean_bg - mean_fg).powi(2);
+                        if variance > max_variance {
+                            max_variance = variance;
+                            threshold = i as u8;
+                        }
+                    }
+                    // Apply threshold
+                    for chunk in upscaled.chunks_exact_mut(4) {
+                        let lum = (0.299 * chunk[0] as f32
+                            + 0.587 * chunk[1] as f32
+                            + 0.114 * chunk[2] as f32) as u8;
+                        let val = if lum > threshold { 255 } else { 0 };
+                        chunk[0] = val;
+                        chunk[1] = val;
+                        chunk[2] = val;
+                        chunk[3] = 255;
+                    }
+
+                    let preprocessed_frame = FrameRgba {
+                        width: new_w,
+                        height: new_h,
+                        data: upscaled,
+                    };
+
                     // 4. Local OCR with layout (Offline)
-                    let ocr_lines = windows_ocr.recognize_lines(&frame, source_lang.as_ref())?;
+                    let mut ocr_lines = windows_ocr.recognize_lines(&preprocessed_frame, source_lang.as_ref())?;
+
+                    // Scale bounding boxes back to original screen coordinates
+                    let inv_scale = 1.0 / scale as f32;
+                    for line in &mut ocr_lines {
+                        line.x *= inv_scale;
+                        line.y *= inv_scale;
+                        line.w *= inv_scale;
+                        line.h *= inv_scale;
+                    }
+
                     let ocr_text = ocr_lines
                         .iter()
                         .map(|l| l.text.as_str())
                         .collect::<Vec<_>>()
                         .join("\n");
                     let ocr_text = ocr_text.trim().to_string();
+
 
                     if ocr_text.is_empty() {
                         return Ok(BgResult::Done {
