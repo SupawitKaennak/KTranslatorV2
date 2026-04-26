@@ -62,6 +62,10 @@ enum BgResult {
     Translating {
         slot_idx: usize,
     },
+    StatusUpdate {
+        slot_idx: usize,
+        status: String,
+    },
     /// An error occurred during OCR / Translation.
     Error {
         slot_idx: usize,
@@ -128,8 +132,8 @@ pub struct App {
     bg_tx: mpsc::Sender<BgResult>,
     bg_rx: mpsc::Receiver<BgResult>,
     slot_busy: Vec<bool>,
-    /// Flags indicating the slot is currently performing an OCR/Translation API call (heavy work)
     slot_processing: Vec<bool>,
+    slot_status: Vec<String>,
 
     /// Hash of the last captured frame per slot — used to skip API calls
     /// when the screen content hasn't changed.
@@ -265,13 +269,14 @@ impl App {
             gemini_models: Vec::new(),
             crop_session: None,
             crop_finish: Arc::new(Mutex::new(None)),
-            capture: Arc::new(ScreenshotsCapture),
+            capture: Arc::new(ScreenshotsCapture::new()),
             windows_ocr: Arc::new(WindowsOcr::new()),
             translator,
             bg_tx,
             bg_rx,
             slot_busy: vec![false],
             slot_processing: vec![false],
+            slot_status: vec!["Idle".to_string()],
             last_frame_hash: vec![0],
             available_screens: screenshots::Screen::all()
                 .unwrap_or_default()
@@ -553,14 +558,14 @@ impl App {
 
             // Translation display removed from main UI as requested.
             // Users can see it in Popup or Overlay Mode.
-            if self.slot_processing[slot_idx] {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label("Thinking...");
-                });
-            } else {
-                ui.weak("Waiting for content changes...");
-            }
+            ui.horizontal(|ui| {
+                if self.slot_processing[slot_idx] || self.slot_busy[slot_idx] {
+                    ui.add(egui::Spinner::new().size(12.0));
+                } else {
+                    ui.label("💤");
+                }
+                ui.label(egui::RichText::new(&self.slot_status[slot_idx]).size(13.0).strong());
+            });
         });
 
         if do_crop {
@@ -997,6 +1002,7 @@ impl App {
                     
                     self.slot_busy[slot_idx] = false;
                     self.slot_processing[slot_idx] = false;
+                    self.slot_status[slot_idx] = "Idle".to_string();
                     self.last_frame_hash[slot_idx] = frame_hash;
                     let now = Self::now_ms();
                     let mut model = self.model.lock();
@@ -1041,6 +1047,7 @@ impl App {
                 }
                 BgResult::Unchanged { slot_idx } => {
                     self.slot_busy[slot_idx] = false;
+                    self.slot_status[slot_idx] = "Idle".to_string();
                     let now = Self::now_ms();
                     let mut model = self.model.lock();
                     model.slots[slot_idx].next_tick_at_ms = now.saturating_add(model.slots[slot_idx].refresh_ms.max(200));
@@ -1050,13 +1057,19 @@ impl App {
                     let now = Self::now_ms();
                     let mut model = self.model.lock();
                     let slot = &mut model.slots[slot_idx];
+                    
+                    // If we've been unstable for > 500ms, STOP resetting the timer.
+                    // This allows the background thread to eventually proceed with translation.
+                    if now.saturating_sub(slot.stable_since_ms) < 500 {
+                        slot.stable_since_ms = now;
+                    }
                     slot.stable_hash = new_hash;
-                    slot.stable_since_ms = now;
                     // Check very aggressively until stable (100ms)
                     slot.next_tick_at_ms = now.saturating_add(100);
                 }
                 BgResult::WaitingDebounce { slot_idx } => {
                     self.slot_busy[slot_idx] = false;
+                    self.slot_status[slot_idx] = "Debouncing...".to_string();
                     let now = Self::now_ms();
                     let mut model = self.model.lock();
                     // Keep aggressively checking until debounce passes
@@ -1075,6 +1088,7 @@ impl App {
                     }
                     self.slot_busy[slot_idx] = false;
                     self.slot_processing[slot_idx] = false;
+                    self.slot_status[slot_idx] = "Idle".to_string();
                     self.last_frame_hash[slot_idx] = frame_hash;
                     let now = Self::now_ms();
                     let mut model = self.model.lock();
@@ -1088,6 +1102,10 @@ impl App {
                 }
                 BgResult::Translating { slot_idx } => {
                     self.slot_processing[slot_idx] = true;
+                    self.slot_status[slot_idx] = "Translating...".to_string();
+                }
+                BgResult::StatusUpdate { slot_idx, status } => {
+                    self.slot_status[slot_idx] = status;
                 }
                 BgResult::Error { slot_idx, language_version, err } => {
                     let current_version = self.model.lock().slots.get(slot_idx).map(|s| s.language_version).unwrap_or(0);
@@ -1103,6 +1121,7 @@ impl App {
 
                     self.slot_busy[slot_idx] = false;
                     self.slot_processing[slot_idx] = false;
+                    self.slot_status[slot_idx] = "Error".to_string();
                     let now = Self::now_ms();
 
                     // Parse Gemini retryDelay (e.g. "27s") from 429 responses.
@@ -1222,20 +1241,25 @@ impl App {
             let language_version = slot.language_version;
             
             std::thread::spawn(move || {
+                let _ = tx.send(BgResult::StatusUpdate { slot_idx: i, status: "Capturing...".to_string() });
                 let result = (|| -> anyhow::Result<BgResult> {
                     let frame = capture.capture_rect(rect, display_id)?;
+                    
+                    let _ = tx.send(BgResult::StatusUpdate { slot_idx: i, status: "Hasing...".to_string() });
 
                     // Hash BEFORE thresholding so the debounce reflects actual screen
                     // content changes rather than BW post-processing artifacts.
                     let hash = smart_hash(&frame.data);
 
                     // 1. Debounce state machine (Visual stability)
-                    if hash != stable_hash {
+                    let is_unstable = hash != stable_hash;
+                    let unstable_dur = now.saturating_sub(stable_since_ms);
+
+                    if is_unstable && unstable_dur < 500 {
                         return Ok(BgResult::HashChanged { slot_idx: i, new_hash: hash });
                     }
 
-                    let now = Self::now_ms();
-                    if now.saturating_sub(stable_since_ms) < debounce_dur_ms {
+                    if unstable_dur < 500 && now.saturating_sub(stable_since_ms) < debounce_dur_ms {
                         return Ok(BgResult::WaitingDebounce { slot_idx: i });
                     }
 
@@ -1294,53 +1318,6 @@ impl App {
                             }
                         }
                     }
-
-                    // Step B: Adaptive Binarization (Otsu-style global threshold)
-                    // Compute a luminance histogram and pick the optimal split.
-                    let mut histogram = [0u32; 256];
-                    let pixel_count = (new_w * new_h) as usize;
-                    for chunk in upscaled.chunks_exact(4) {
-                        let lum = (0.299 * chunk[0] as f32
-                            + 0.587 * chunk[1] as f32
-                            + 0.114 * chunk[2] as f32) as u8;
-                        histogram[lum as usize] += 1;
-                    }
-                    // Otsu's method
-                    let total = pixel_count as f64;
-                    let mut sum_total: f64 = 0.0;
-                    for (i, &count) in histogram.iter().enumerate() {
-                        sum_total += i as f64 * count as f64;
-                    }
-                    let mut sum_bg: f64 = 0.0;
-                    let mut weight_bg: f64 = 0.0;
-                    let mut max_variance: f64 = 0.0;
-                    let mut threshold: u8 = 128;
-                    for (i, &count) in histogram.iter().enumerate() {
-                        weight_bg += count as f64;
-                        if weight_bg == 0.0 { continue; }
-                        let weight_fg = total - weight_bg;
-                        if weight_fg == 0.0 { break; }
-                        sum_bg += i as f64 * count as f64;
-                        let mean_bg = sum_bg / weight_bg;
-                        let mean_fg = (sum_total - sum_bg) / weight_fg;
-                        let variance = weight_bg * weight_fg * (mean_bg - mean_fg).powi(2);
-                        if variance > max_variance {
-                            max_variance = variance;
-                            threshold = i as u8;
-                        }
-                    }
-                    // Apply threshold
-                    for chunk in upscaled.chunks_exact_mut(4) {
-                        let lum = (0.299 * chunk[0] as f32
-                            + 0.587 * chunk[1] as f32
-                            + 0.114 * chunk[2] as f32) as u8;
-                        let val = if lum > threshold { 255 } else { 0 };
-                        chunk[0] = val;
-                        chunk[1] = val;
-                        chunk[2] = val;
-                        chunk[3] = 255;
-                    }
-
                     let preprocessed_frame = FrameRgba {
                         width: new_w,
                         height: new_h,
@@ -1348,6 +1325,7 @@ impl App {
                     };
 
                     // 4. Local OCR with layout (Offline)
+                    let _ = tx.send(BgResult::StatusUpdate { slot_idx: i, status: "OCR...".to_string() });
                     let mut ocr_lines = windows_ocr.recognize_lines(&preprocessed_frame, source_lang.as_ref())?;
 
                     // Scale bounding boxes back to original screen coordinates
@@ -1768,6 +1746,12 @@ impl eframe::App for App {
                     self.last_frame_hash.push(0);
                     self.overlay_hwnd_cache.push(Arc::new(std::sync::atomic::AtomicIsize::new(0)));
                 }
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.vertical_centered(|ui| {
+                    ui.label(egui::RichText::new("💡 Tip: If games don't translate, use 'Borderless Windowed' mode.").small().weak());
+                });
             });
 
             required_height += content_resp.response.rect.height();
