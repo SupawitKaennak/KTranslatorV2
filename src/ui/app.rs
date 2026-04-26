@@ -948,9 +948,15 @@ impl App {
                     // Only update UI if the OCR text actually changed
                     let new_ocr = ocr_text.trim();
                     let old_ocr = slot.last_ocr_text.trim();
-                    let content_changed = !new_ocr.is_empty() && new_ocr != old_ocr;
 
-                    if content_changed {
+                    if new_ocr.is_empty() {
+                        // Screen is now empty — clear old translation to prevent ghosting
+                        slot.last_ocr_text.clear();
+                        slot.last_translation.clear();
+                        slot.last_ocr_lines.clear();
+                        slot.last_trans_lines.clear();
+                    } else if new_ocr != old_ocr {
+                        // Content changed — update with new translation
                         slot.last_ocr_text = ocr_text;
                         if !translated.trim().is_empty() {
                             let line_count = ocr_lines.len();
