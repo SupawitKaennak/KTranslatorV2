@@ -30,6 +30,7 @@ enum BgResult {
     /// Combined OCR + Translation completed successfully.
     Done {
         slot_idx: usize,
+        language_version: u32,
         ocr_text: String,
         translated: String,
         frame_hash: u64,
@@ -52,6 +53,7 @@ enum BgResult {
     /// The frame matches a cached translation.
     CacheHit {
         slot_idx: usize,
+        language_version: u32,
         ocr_text: String,
         translated: String,
         frame_hash: u64,
@@ -63,6 +65,7 @@ enum BgResult {
     /// An error occurred during OCR / Translation.
     Error {
         slot_idx: usize,
+        language_version: u32,
         err: String,
     },
 }
@@ -105,7 +108,7 @@ pub struct App {
     show_settings: bool,
     /// true once when user opens Settings: try to fetch models from API
     settings_fetch_models_pending: bool,
-    last_error: Option<String>,
+    last_errors: std::collections::BTreeMap<usize, String>,
     /// Empty = use built-in fallback list until Refresh succeeds
     gemini_models: Vec<GeminiModel>,
 
@@ -135,13 +138,13 @@ pub struct App {
     /// Available displays for capturing (ID, Label)
     available_screens: Vec<(u32, String)>,
 
-    /// Cache for smart_hash → (ocr_text, translated_text)
-    translation_cache: Arc<Mutex<std::collections::HashMap<u64, (String, String)>>>,
+    /// Cache for (smart_hash, source_lang, target_lang) → (ocr_text, translated_text)
+    translation_cache: Arc<Mutex<std::collections::HashMap<(u64, Option<String>, String), (String, String)>>>,
 
     /// Cache for OCR text hash → translated_text.
     /// Catches cases where the same text appears with different pixel content
     /// (e.g., cursor blink, slight background variation) without re-calling the API.
-    text_translation_cache: Arc<Mutex<std::collections::HashMap<u64, String>>>,
+    text_translation_cache: Arc<Mutex<std::collections::HashMap<(u64, Option<String>, String), String>>>,
 
     /// Per-slot cache of the raw HWND (as isize) for the overlay window.
     /// We call FindWindowW every frame (cheap) and re-apply SetLayeredWindowAttributes
@@ -153,6 +156,10 @@ pub struct App {
     /// Last known (source_lang, target_lang) per slot.
     /// When this changes we invalidate caches and reset frame hash to force retranslation.
     slot_last_langs: Vec<(Option<String>, String)>,
+    
+    /// Channel to signal error dismissal from the error viewport
+    error_dismiss_tx: mpsc::Sender<()>,
+    error_dismiss_rx: mpsc::Receiver<()>,
 }
 
 impl App {
@@ -227,6 +234,7 @@ impl App {
         let translator = Self::create_translator(&settings);
 
         let (bg_tx, bg_rx) = mpsc::channel();
+        let (err_tx, err_rx) = mpsc::channel();
 
         if settings.dark_mode {
             let mut visuals = egui::Visuals::dark();
@@ -253,7 +261,7 @@ impl App {
             settings,
             show_settings: false,
             settings_fetch_models_pending: false,
-            last_error: None,
+            last_errors: std::collections::BTreeMap::new(),
             gemini_models: Vec::new(),
             crop_session: None,
             crop_finish: Arc::new(Mutex::new(None)),
@@ -283,6 +291,8 @@ impl App {
             text_translation_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
             overlay_hwnd_cache: vec![Arc::new(std::sync::atomic::AtomicIsize::new(0))],
             slot_last_langs: vec![(None, String::new())],
+            error_dismiss_tx: err_tx,
+            error_dismiss_rx: err_rx,
         }
     }
 
@@ -559,9 +569,11 @@ impl App {
                 Ok(st) => {
                     *self.crop_finish.lock() = None;
                     self.crop_session = Some(Arc::new(Mutex::new(st)));
-                    self.last_error = None;
+                    self.last_errors.clear();
                 }
-                Err(e) => self.last_error = Some(format!("{e:#}")),
+                Err(e) => {
+                    self.last_errors.insert(999, format!("{e:#}"));
+                }
             }
         }
 
@@ -898,24 +910,56 @@ impl App {
         let has_numbers = raw.lines().any(|l| {
             let t = l.trim();
             t.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
-                && t.contains('.')
         });
 
         if !has_numbers || ocr_count == 0 {
-            // Plain split fallback
-            return raw.lines().map(|s| s.trim().to_string()).collect();
+            // Plain split fallback - but ensure we don't return more lines than requested
+            let lines: Vec<String> = raw.lines().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            if lines.len() == ocr_count {
+                return lines;
+            }
+            // If line count doesn't match, try to use the numbers anyway or fallback to empty
+            let mut res = vec!["ไม่มีข้อความที่ต้องแปล".to_string(); ocr_count];
+            for (idx, line) in lines.iter().enumerate().take(ocr_count) {
+                res[idx] = line.clone();
+            }
+            return res;
         }
 
-        let mut result: Vec<String> = vec![String::new(); ocr_count];
+        let mut result = vec!["ไม่มีข้อความที่ต้องแปล".to_string(); ocr_count];
         for line in raw.lines() {
             let trimmed = line.trim();
-            // Match "N. text" or "N) text"
-            if let Some(dot) = trimmed.find(|c: char| c == '.' || c == ')') {
-                let idx_str = &trimmed[..dot];
-                if let Ok(idx) = idx_str.trim().parse::<usize>() {
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            // Find the first sequence of digits at the start of the line
+            let mut num_str = String::new();
+            for c in trimmed.chars() {
+                if c.is_ascii_digit() {
+                    num_str.push(c);
+                } else {
+                    break;
+                }
+            }
+
+            if !num_str.is_empty() {
+                if let Ok(idx) = num_str.parse::<usize>() {
                     if idx >= 1 && idx <= ocr_count {
-                        let content = trimmed[dot + 1..].trim().to_string();
-                        result[idx - 1] = content;
+                        // Find where the actual text starts (skip the number and any punctuation like . : ) )
+                        let mut start_idx = num_str.len();
+                        let remaining = &trimmed[start_idx..];
+                        for c in remaining.chars() {
+                            if c == '.' || c == ')' || c == ':' || c.is_whitespace() {
+                                start_idx += c.len_utf8();
+                            } else {
+                                break;
+                            }
+                        }
+                        let content = trimmed[start_idx..].trim().to_string();
+                        if !content.is_empty() {
+                            result[idx - 1] = content;
+                        }
                     }
                 }
             }
@@ -924,16 +968,33 @@ impl App {
     }
 
     fn tick_background(&mut self) {
+        // 0. Handle error dismissal from the error viewport
+        while let Ok(_) = self.error_dismiss_rx.try_recv() {
+            self.last_errors.clear();
+        }
+
         // 1. Drain results from background threads
         while let Ok(result) = self.bg_rx.try_recv() {
             match result {
                 BgResult::Done {
                     slot_idx,
+                    language_version,
                     ocr_text,
                     translated,
                     frame_hash,
                     ocr_lines,
                 } => {
+                    let current_version = self.model.lock().slots.get(slot_idx).map(|s| s.language_version).unwrap_or(0);
+                    if language_version != current_version {
+                        self.slot_busy[slot_idx] = false;
+                        self.slot_processing[slot_idx] = false;
+                        let mut model = self.model.lock();
+                        if let Some(s) = model.slots.get_mut(slot_idx) {
+                            s.next_tick_at_ms = 0;
+                        }
+                        return;
+                    }
+                    
                     self.slot_busy[slot_idx] = false;
                     self.slot_processing[slot_idx] = false;
                     self.last_frame_hash[slot_idx] = frame_hash;
@@ -965,8 +1026,18 @@ impl App {
                             slot.last_translation = translated;
                             slot.pending_text.clear();
                         }
+                    } else {
+                        // Content hasn't changed, but maybe we forced a re-translate 
+                        // due to language change. We should still update the translation.
+                        if !translated.trim().is_empty() {
+                            let line_count = ocr_lines.len();
+                            slot.last_trans_lines =
+                                Self::parse_numbered_lines(&translated, line_count);
+                            slot.last_ocr_lines = ocr_lines;
+                            slot.last_translation = translated;
+                        }
                     }
-                    self.last_error = None;
+                    self.last_errors.remove(&slot_idx);
                 }
                 BgResult::Unchanged { slot_idx } => {
                     self.slot_busy[slot_idx] = false;
@@ -991,7 +1062,17 @@ impl App {
                     // Keep aggressively checking until debounce passes
                     model.slots[slot_idx].next_tick_at_ms = now.saturating_add(100);
                 }
-                BgResult::CacheHit { slot_idx, ocr_text, translated, frame_hash } => {
+                BgResult::CacheHit { slot_idx, language_version, ocr_text, translated, frame_hash } => {
+                    let current_version = self.model.lock().slots.get(slot_idx).map(|s| s.language_version).unwrap_or(0);
+                    if language_version != current_version {
+                        self.slot_busy[slot_idx] = false;
+                        self.slot_processing[slot_idx] = false;
+                        let mut model = self.model.lock();
+                        if let Some(s) = model.slots.get_mut(slot_idx) {
+                            s.next_tick_at_ms = 0;
+                        }
+                        return;
+                    }
                     self.slot_busy[slot_idx] = false;
                     self.slot_processing[slot_idx] = false;
                     self.last_frame_hash[slot_idx] = frame_hash;
@@ -1008,7 +1089,18 @@ impl App {
                 BgResult::Translating { slot_idx } => {
                     self.slot_processing[slot_idx] = true;
                 }
-                BgResult::Error { slot_idx, err } => {
+                BgResult::Error { slot_idx, language_version, err } => {
+                    let current_version = self.model.lock().slots.get(slot_idx).map(|s| s.language_version).unwrap_or(0);
+                    if language_version != current_version {
+                        self.slot_busy[slot_idx] = false;
+                        self.slot_processing[slot_idx] = false;
+                        let mut model = self.model.lock();
+                        if let Some(s) = model.slots.get_mut(slot_idx) {
+                            s.next_tick_at_ms = 0;
+                        }
+                        return;
+                    }
+
                     self.slot_busy[slot_idx] = false;
                     self.slot_processing[slot_idx] = false;
                     let now = Self::now_ms();
@@ -1045,7 +1137,8 @@ impl App {
                         let first_line = err.lines().next().unwrap_or(&err).trim().to_string();
                         format!("Region {}: {first_line}", slot_idx + 1)
                     };
-                    self.last_error = Some(friendly);
+                    self.last_errors.insert(slot_idx, friendly);
+                    self.model.lock().running = false;
                 }
             }
         }
@@ -1083,9 +1176,18 @@ impl App {
                 self.text_translation_cache.lock().clear();
                 // Clear overlay so old-language text disappears immediately
                 if let Some(m_slot) = self.model.lock().slots.get_mut(i) {
+                    m_slot.language_version = m_slot.language_version.wrapping_add(1);
                     m_slot.last_trans_lines.clear();
                     m_slot.last_ocr_lines.clear();
                     m_slot.last_translation.clear();
+                    m_slot.last_ocr_text.clear();
+                    m_slot.next_tick_at_ms = 0; // Force immediate re-tick
+                }
+                // Also reset frame hash for this slot to force fresh OCR
+                self.last_frame_hash[i] = 1;
+                if let Some(m_slot) = self.model.lock().slots.get_mut(i) {
+                    m_slot.stable_hash = 0; // Reset stability state
+                    m_slot.stable_since_ms = 0;
                 }
             }
 
@@ -1117,7 +1219,8 @@ impl App {
 
             let cache_arc = self.translation_cache.clone();
             let text_cache_arc = self.text_translation_cache.clone();
-
+            let language_version = slot.language_version;
+            
             std::thread::spawn(move || {
                 let result = (|| -> anyhow::Result<BgResult> {
                     let frame = capture.capture_rect(rect, display_id)?;
@@ -1142,11 +1245,13 @@ impl App {
                     }
 
                     // 3. New stable scene — check frame-hash cache first.
+                    let cache_key = (hash, source_lang.as_ref().map(|l| l.0.clone()), target_lang.0.clone());
                     {
                         let cache = cache_arc.lock();
-                        if let Some((ocr, tra)) = cache.get(&hash) {
+                        if let Some((ocr, tra)) = cache.get(&cache_key) {
                             return Ok(BgResult::CacheHit {
                                 slot_idx: i,
+                                language_version,
                                 ocr_text: ocr.clone(),
                                 translated: tra.clone(),
                                 frame_hash: hash,
@@ -1265,6 +1370,7 @@ impl App {
                     if ocr_text.is_empty() {
                         return Ok(BgResult::Done {
                             slot_idx: i,
+                            language_version,
                             ocr_text: String::new(),
                             translated: String::new(),
                             frame_hash: hash,
@@ -1275,9 +1381,10 @@ impl App {
                     // 4b. Fast-path: same source == target language — no API needed.
                     if source_lang.as_ref().map(|s| s.0 == target_lang.0).unwrap_or(false) {
                         let mut cache = cache_arc.lock();
-                        cache.insert(hash, (ocr_text.clone(), ocr_text.clone()));
+                        cache.insert(cache_key, (ocr_text.clone(), ocr_text.clone()));
                         return Ok(BgResult::Done {
                             slot_idx: i,
+                            language_version,
                             ocr_text: ocr_text.clone(),
                             translated: ocr_text,
                             frame_hash: hash,
@@ -1295,16 +1402,18 @@ impl App {
                             }
                             h
                         };
+                        let text_cache_key = (text_hash, source_lang.as_ref().map(|l| l.0.clone()), target_lang.0.clone());
                         // Clone the translation out before releasing the guard
                         let cached = {
                             let text_cache = text_cache_arc.lock();
-                            text_cache.get(&text_hash).cloned()
+                            text_cache.get(&text_cache_key).cloned()
                         };
                         if let Some(cached_trans) = cached {
                             let mut cache = cache_arc.lock();
-                            cache.insert(hash, (ocr_text.clone(), cached_trans.clone()));
+                            cache.insert(cache_key, (ocr_text.clone(), cached_trans.clone()));
                             return Ok(BgResult::Done {
                                 slot_idx: i,
+                                language_version,
                                 ocr_text,
                                 translated: cached_trans,
                                 frame_hash: hash,
@@ -1328,15 +1437,17 @@ impl App {
                                 }
                                 h
                             };
+                            let text_cache_key = (text_hash, source_lang.as_ref().map(|l| l.0.clone()), target_lang.0.clone());
                             let mut frame_cache = cache_arc.lock();
-                            frame_cache.insert(hash, (ocr_text.clone(), translated.clone()));
+                            frame_cache.insert(cache_key, (ocr_text.clone(), translated.clone()));
                             drop(frame_cache);
                             let mut text_cache = text_cache_arc.lock();
-                            text_cache.insert(text_hash, translated.clone());
+                            text_cache.insert(text_cache_key, translated.clone());
                         }
 
                         Ok(BgResult::Done {
                             slot_idx: i,
+                            language_version,
                             ocr_text,
                             translated,
                             frame_hash: hash,
@@ -1352,7 +1463,11 @@ impl App {
                         let _ = tx.send(bg_res);
                     }
                     Err(e) => {
-                        let _ = tx.send(BgResult::Error { slot_idx: i, err: format!("{e:#}") });
+                        let _ = tx.send(BgResult::Error { 
+                            slot_idx: i, 
+                            language_version, 
+                            err: format!("{e:#}") 
+                        });
                     }
                 }
             });
@@ -1368,14 +1483,13 @@ impl App {
             match GeminiTranslator::list_models(&self.settings.gemini_api_key) {
                 Ok(models) if !models.is_empty() => {
                     self.gemini_models = models;
-                    self.last_error = None;
+                    self.last_errors.clear();
                 }
                 Ok(_) => {
-                    self.last_error =
-                        Some("listModels returned empty (using built-in list)".to_string());
+                    self.last_errors.insert(999, "listModels returned empty (using built-in list)".to_string());
                 }
                 Err(e) => {
-                    self.last_error = Some(format!(
+                    self.last_errors.insert(999, format!(
                         "{e:#}\n(using built-in model list; check API key or click Refresh)"
                     ));
                 }
@@ -1435,9 +1549,11 @@ impl App {
                                 match GeminiTranslator::list_models(&self.settings.gemini_api_key) {
                                     Ok(models) => {
                                         self.gemini_models = models;
-                                        self.last_error = None;
+                                        self.last_errors.clear();
                                     }
-                                    Err(e) => self.last_error = Some(format!("{e:#}")),
+                                    Err(e) => {
+                                        self.last_errors.insert(999, format!("{e:#}"));
+                                    }
                                 }
                             }
                         });
@@ -1484,15 +1600,58 @@ impl App {
                 ui.separator();
                 if ui.button("Save & Apply").clicked() {
                     if let Err(e) = save_settings(&self.settings) {
-                        self.last_error = Some(format!("{e:#}"));
+                        self.last_errors.insert(999, format!("{e:#}"));
                     } else {
                         // Recreate the translator adapter with new settings
                         self.translator = Self::create_translator(&self.settings);
-                        self.last_error = None;
+                        self.last_errors.clear();
                     }
                 }
             });
         self.show_settings = open;
+    }
+
+    fn ui_error_popup(&mut self, ctx: &egui::Context) {
+        if self.last_errors.is_empty() { return; }
+        
+        let viewport_id = egui::ViewportId::from_hash_of("error_popup");
+        let tx = self.error_dismiss_tx.clone();
+        let errors: Vec<String> = self.last_errors.values().cloned().collect();
+        
+        ctx.show_viewport_immediate(
+            viewport_id,
+            egui::ViewportBuilder::default()
+                .with_title("KTranslator - Error Report")
+                .with_inner_size([450.0, 220.0])
+                .with_always_on_top()
+                .with_decorations(true)
+                .with_resizable(false),
+            move |ctx, _| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(10.0);
+                        ui.heading(
+                            egui::RichText::new("[!] System Error")
+                                .color(egui::Color32::from_rgb(255, 80, 80))
+                                .strong()
+                        );
+                        ui.add_space(10.0);
+                        
+                        egui::ScrollArea::vertical().max_height(120.0).show(ui, |ui| {
+                            for err in &errors {
+                                ui.label(egui::RichText::new(err).size(14.0));
+                                ui.add_space(4.0);
+                            }
+                        });
+                        
+                        ui.add_space(15.0);
+                        if ui.button(egui::RichText::new(" Dismiss All Errors ").size(16.0)).clicked() {
+                            let _ = tx.send(());
+                        }
+                    });
+                });
+            }
+        );
     }
 }
 
@@ -1505,6 +1664,7 @@ impl eframe::App for App {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.tick_background();
+        self.ui_error_popup(ctx);
 
         if let Some(sess) = &self.crop_session {
             run_crop_viewport(ctx, sess.clone(), self.crop_finish.clone());
@@ -1546,13 +1706,17 @@ impl eframe::App for App {
                         
                     if ui.add(button).on_hover_text(if *running { "Stop translation loop" } else { "Start translation loop" }).clicked() {
                         *running = !*running;
+                        if *running {
+                            // Reset all timers to trigger immediately when starting manually
+                            for slot in &mut model.slots {
+                                slot.next_tick_at_ms = 0;
+                            }
+                            // Also clear errors when manually starting
+                            self.last_errors.clear();
+                        }
                     }
                     
                     ui.add_space(8.0);
-                    
-                    if let Some(err) = &self.last_error {
-                        ui.colored_label(egui::Color32::LIGHT_RED, format!("⚠️ {err}"));
-                    }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let theme_icon = if self.settings.dark_mode { "🌙" } else { "🔆" };

@@ -64,14 +64,16 @@ impl Translator for OllamaTranslator {
 
         let system_prompt = if multi_line {
             format!(
-                "You are a professional translator. Translate each numbered line into {}. \
-                 Keep the same numbers. Output ONLY the translated numbered list.",
+                "You are a professional translator. CRITICAL: Translate each numbered line into {}. \
+                 You MUST return EXACTLY the same number of lines as provided. \
+                 Keep the same numbering (N. <translation>). Do NOT skip or merge lines. \
+                 Output ONLY the translated numbered list, no extra text.",
                 target_name
             )
         } else {
             format!(
                 "You are a professional translator. Translate this text into {}. \
-                 Output ONLY the translated text.",
+                 Output ONLY the translated text, no explanations.",
                 target_name
             )
         };

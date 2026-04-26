@@ -34,6 +34,8 @@ pub struct RegionSlot {
     pub translate_next_try_at_ms: u64,
     pub popup_open: bool,
     pub overlay_mode: bool,
+    #[serde(skip)]
+    pub language_version: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +68,7 @@ impl AppModel {
             translate_next_try_at_ms: 0,
             popup_open: false,
             overlay_mode: false,
+            language_version: 0,
         });
         Self {
             running: false,
@@ -95,6 +98,7 @@ impl AppModel {
             translate_next_try_at_ms: 0,
             popup_open: false,
             overlay_mode: false,
+            language_version: 0,
         });
         new_idx
     }

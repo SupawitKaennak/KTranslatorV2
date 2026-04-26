@@ -6,8 +6,8 @@ use crate::core::{ports::Translator, types::LanguageTag};
 
 #[derive(Debug, Clone)]
 pub struct GeminiModel {
-    pub id: String,          // "gemini-2.5-flash"
-    pub display_name: String, // "Gemini 2.5 Flash"
+    pub id: String,          // "gemini-2.0-flash"
+    pub display_name: String, // "Gemini 2.0 Flash"
 }
 
 #[derive(Clone)]
@@ -54,7 +54,6 @@ impl GeminiTranslator {
         let data: ListModelsResponse = resp.json().context("parse listModels response")?;
         let mut out = Vec::new();
         for m in data.models {
-            // name is typically like "models/gemini-2.5-flash"
             let id = m
                 .name
                 .strip_prefix("models/")
@@ -92,11 +91,6 @@ impl Translator for GeminiTranslator {
             bail!("Gemini API key is empty (open Settings and set it)");
         }
 
-        // ── Numbered-line protocol ──────────────────────────────────────────
-        // When the source has multiple lines (one per OCR text-block), we prefix
-        // each line with its 1-based index and ask Gemini to return the same
-        // numbering. This guarantees that the translated line at index N maps to
-        // OCR line N even if Gemini skips or merges some lines.
         let source_lines: Vec<&str> = text.lines().collect();
         let (prompt_body, multi_line) = if source_lines.len() > 1 {
             let numbered = source_lines
@@ -111,145 +105,109 @@ impl Translator for GeminiTranslator {
         };
 
         let line_instruction = if multi_line {
-            " The source is a numbered list of text blocks, one per line. \
-             Return ONLY the translations as a numbered list in the same format \
-             (e.g. '1. translation'). Keep the same numbering. \
-             Do not add explanations or extra lines."
+            "CRITICAL: The input is a numbered list of lines. \
+             You MUST return EXACTLY the same number of lines as provided. \
+             Each output line must start with its corresponding number (N. <translation>). \
+             Do NOT skip, merge, or omit any lines. \
+             Even if a line is short or empty, you must include its number. \
+             Return ONLY the numbered list, no intro, no outro, no notes."
                 .to_string()
         } else {
-            " Output ONLY the translated text, no explanations.".to_string()
+            "Output ONLY the translated text, no explanations.".to_string()
         };
 
         let prompt = if let Some(src) = source {
             format!(
-                "Translate from {} to {}.{}\n\n{}",
+                "Translate from {} to {}. {}\n\n{}",
                 src.0, target.0, line_instruction, prompt_body
             )
         } else {
             format!(
-                "Translate to {}. Auto-detect the source language.{}\n\n{}",
+                "Translate to {}. Auto-detect the source language. {}\n\n{}",
                 target.0, line_instruction, prompt_body
             )
         };
 
-        let req = GenerateContentRequest {
+        let body = RequestBody {
             contents: vec![Content {
                 parts: vec![Part { text: prompt }],
             }],
             generation_config: Some(GenerationConfig {
-                temperature: Some(0.2),
-                top_p: Some(0.95),
+                temperature: Some(0.1),
                 max_output_tokens: Some(4096),
-                // Disable reasoning tokens — translation is deterministic.
-                // Ignored by models that don't support it; saves tokens on 2.5-flash.
-                thinking_config: Some(ThinkingConfig { thinking_budget: 0 }),
+                ..Default::default()
             }),
         };
 
-        let resp = self
-            .client
+        let resp = self.client
             .post(self.endpoint())
-            .header("x-goog-api-key", self.api_key.clone())
-            .json(&req)
+            .query(&[("key", &self.api_key)])
+            .json(&body)
             .send()
-            .context("send gemini request")?;
+            .context("send generateContent request")?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().unwrap_or_default();
-            bail!("Gemini error: {status} {body}");
+            bail!("Gemini API error: {status} {body}");
         }
 
-        let data: GenerateContentResponse = resp.json().context("parse gemini response")?;
-        let out = data
+        let data: ResponseBody = resp.json().context("parse generateContent response")?;
+        let translated = data
             .candidates
-            .into_iter()
-            .next()
-            .and_then(|c| c.content)
-            .and_then(|c| c.parts.into_iter().next())
-            .map(|p| p.text)
-            .unwrap_or_default();
+            .get(0)
+            .and_then(|c| c.content.parts.get(0))
+            .map(|p| p.text.clone())
+            .ok_or_else(|| anyhow::anyhow!("Gemini returned no candidates (Safety filter?)"))?;
 
-        Ok(out.trim().to_string())
+        Ok(translated)
     }
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct GenerateContentRequest {
+#[derive(Serialize)]
+struct RequestBody {
     contents: Vec<Content>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "generationConfig")]
     generation_config: Option<GenerationConfig>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize, Deserialize)]
 struct Content {
     parts: Vec<Part>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize, Deserialize)]
 struct Part {
     text: String,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Serialize, Default)]
 struct GenerationConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    top_p: Option<f32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "maxOutputTokens")]
     max_output_tokens: Option<u32>,
-    /// Disable thinking tokens for 2.5-flash models (translation is a
-    /// simple deterministic task — thinking adds cost with no benefit).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    thinking_config: Option<ThinkingConfig>,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ThinkingConfig {
-    thinking_budget: u32,
-}
-
-#[derive(Debug, Deserialize)]
-struct GenerateContentResponse {
-    #[serde(default)]
+#[derive(Deserialize)]
+struct ResponseBody {
     candidates: Vec<Candidate>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct Candidate {
-    #[serde(default)]
-    content: Option<CandidateContent>,
+    content: Content,
 }
 
-#[derive(Debug, Deserialize)]
-struct CandidateContent {
-    #[serde(default)]
-    parts: Vec<CandidatePart>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CandidatePart {
-    #[serde(default)]
-    text: String,
-}
-
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct ListModelsResponse {
-    #[serde(default)]
     models: Vec<ModelInfo>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Deserialize)]
 struct ModelInfo {
     name: String,
-    #[serde(default)]
+    #[serde(rename = "displayName")]
     display_name: Option<String>,
-    #[serde(default)]
+    #[serde(rename = "supportedGenerationMethods")]
     supported_generation_methods: Option<Vec<String>>,
 }
-
