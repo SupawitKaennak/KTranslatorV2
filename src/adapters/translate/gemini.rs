@@ -139,7 +139,7 @@ impl Translator for GeminiTranslator {
             generation_config: Some(GenerationConfig {
                 temperature: Some(0.2),
                 top_p: Some(0.95),
-                max_output_tokens: Some(512),
+                max_output_tokens: Some(4096),
                 // Disable reasoning tokens — translation is deterministic.
                 // Ignored by models that don't support it; saves tokens on 2.5-flash.
                 thinking_config: Some(ThinkingConfig { thinking_budget: 0 }),
