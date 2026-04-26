@@ -1235,12 +1235,14 @@ impl App {
                     let hash = smart_hash(&frame.data);
 
                     // 1. Debounce state machine (Visual stability)
-                    if hash != stable_hash {
+                    let is_unstable = hash != stable_hash;
+                    let unstable_dur = now.saturating_sub(stable_since_ms);
+
+                    if is_unstable && unstable_dur < 500 {
                         return Ok(BgResult::HashChanged { slot_idx: i, new_hash: hash });
                     }
 
-                    let now = Self::now_ms();
-                    if now.saturating_sub(stable_since_ms) < debounce_dur_ms {
+                    if unstable_dur < 500 && now.saturating_sub(stable_since_ms) < debounce_dur_ms {
                         return Ok(BgResult::WaitingDebounce { slot_idx: i });
                     }
 
