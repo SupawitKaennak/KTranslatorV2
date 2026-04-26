@@ -1050,8 +1050,13 @@ impl App {
                     let now = Self::now_ms();
                     let mut model = self.model.lock();
                     let slot = &mut model.slots[slot_idx];
+                    
+                    // If we've been unstable for > 500ms, STOP resetting the timer.
+                    // This allows the background thread to eventually proceed with translation.
+                    if now.saturating_sub(slot.stable_since_ms) < 500 {
+                        slot.stable_since_ms = now;
+                    }
                     slot.stable_hash = new_hash;
-                    slot.stable_since_ms = now;
                     // Check very aggressively until stable (100ms)
                     slot.next_tick_at_ms = now.saturating_add(100);
                 }
