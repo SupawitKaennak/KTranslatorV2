@@ -265,7 +265,7 @@ impl App {
             gemini_models: Vec::new(),
             crop_session: None,
             crop_finish: Arc::new(Mutex::new(None)),
-            capture: Arc::new(ScreenshotsCapture),
+            capture: Arc::new(ScreenshotsCapture::new()),
             windows_ocr: Arc::new(WindowsOcr::new()),
             translator,
             bg_tx,
@@ -1768,6 +1768,12 @@ impl eframe::App for App {
                     self.last_frame_hash.push(0);
                     self.overlay_hwnd_cache.push(Arc::new(std::sync::atomic::AtomicIsize::new(0)));
                 }
+
+                ui.add_space(8.0);
+                ui.separator();
+                ui.vertical_centered(|ui| {
+                    ui.label(egui::RichText::new("💡 Tip: If games don't translate, use 'Borderless Windowed' mode.").small().weak());
+                });
             });
 
             required_height += content_resp.response.rect.height();
