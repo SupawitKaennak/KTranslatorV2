@@ -701,6 +701,9 @@ impl App {
                                 let has_positions = !ocr_lines.is_empty();
 
                                 if has_positions {
+                                    // Max width for text wrapping = region width
+                                    let max_text_w = full_rect.width() - 8.0;
+
                                     for (idx, ocr_line) in ocr_lines.iter().enumerate() {
                                         let trans = trans_lines
                                             .get(idx)
@@ -711,16 +714,19 @@ impl App {
                                         // Font size ~90% of OCR line height, clamped sensibly
                                         let font_size = (ocr_line.h * 0.90).clamp(11.0, 26.0);
 
+                                        // Wrap text within region width
+                                        let wrap_width = (max_text_w - ocr_line.x + full_rect.left()).max(100.0);
                                         let galley = ctx.fonts(|f| {
-                                            f.layout_no_wrap(
+                                            f.layout(
                                                 trans.to_string(),
                                                 egui::FontId::proportional(font_size),
                                                 egui::Color32::WHITE,
+                                                wrap_width,
                                             )
                                         });
 
                                         // Background covers the ENTIRE OCR line area to fully hide original text
-                                        let bg_w = ocr_line.w.max(galley.size().x + 10.0);
+                                        let bg_w = ocr_line.w.max(galley.size().x + 10.0).min(wrap_width + 10.0);
                                         let bg_h = ocr_line.h.max(galley.size().y + 4.0);
                                         let bg = egui::Rect::from_min_size(
                                             egui::pos2(ocr_line.x - 2.0, ocr_line.y - 1.0),
@@ -745,11 +751,13 @@ impl App {
                                         let mut y = last.y + last.h + 4.0;
                                         for extra in &trans_lines[ocr_lines.len()..] {
                                             if extra.trim().is_empty() { continue; }
+                                            let wrap_width = (full_rect.width() - last.x + full_rect.left() - 8.0).max(100.0);
                                             let galley = ctx.fonts(|f| {
-                                                f.layout_no_wrap(
+                                                f.layout(
                                                     extra.clone(),
                                                     egui::FontId::proportional(14.0),
                                                     egui::Color32::WHITE,
+                                                    wrap_width,
                                                 )
                                             });
                                             let pos = egui::pos2(last.x, y);
@@ -769,11 +777,13 @@ impl App {
                                     let mut y = full_rect.top() + 8.0;
                                     for line in fallback_text.lines() {
                                         if line.trim().is_empty() { continue; }
+                                        let wrap_width = full_rect.width() - 16.0;
                                         let galley = ctx.fonts(|f| {
-                                            f.layout_no_wrap(
+                                            f.layout(
                                                 line.to_string(),
                                                 egui::FontId::proportional(font_size),
                                                 egui::Color32::WHITE,
+                                                wrap_width,
                                             )
                                         });
                                         let x = (full_rect.center().x - galley.size().x / 2.0)
