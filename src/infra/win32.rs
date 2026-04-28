@@ -7,6 +7,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     FindWindowW, SetLayeredWindowAttributes, LWA_COLORKEY,
     SetWindowDisplayAffinity, WINDOW_DISPLAY_AFFINITY,
 };
+#[cfg(target_os = "windows")]
+use windows::Win32::System::Threading::{
+    GetCurrentProcess, SetPriorityClass, ABOVE_NORMAL_PRIORITY_CLASS,
+};
 
 /// WDA_EXCLUDEFROMCAPTURE = 0x11: window is visible to the user
 /// but excluded from screen capture / screenshots APIs.
@@ -46,4 +50,14 @@ pub fn apply_overlay_attributes(hwnd_raw: isize) {
         let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
     }
     let _ = hwnd_raw;
+}
+
+/// Boosts the current process priority to Above Normal to ensure 
+/// background threads (OCR/Translation) get enough CPU cycles during gaming.
+pub fn boost_process_priority() {
+    #[cfg(target_os = "windows")]
+    unsafe {
+        let handle = GetCurrentProcess();
+        let _ = SetPriorityClass(handle, ABOVE_NORMAL_PRIORITY_CLASS);
+    }
 }

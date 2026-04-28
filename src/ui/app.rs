@@ -146,6 +146,7 @@ impl App {
         cc.egui_ctx.set_fonts(fonts);
 
         let settings = load_settings().unwrap_or_default();
+        crate::infra::win32::boost_process_priority();
 
         let translator = create_translator(&settings);
 
