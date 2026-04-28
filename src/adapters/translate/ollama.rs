@@ -64,12 +64,10 @@ impl Translator for OllamaTranslator {
         let system = if source_lines.len() > 1 {
             format!(
                 "Translate each line into {}. \
-                 Return EXACTLY {} lines of translation. \
-                 Each input line must have exactly one output line. \
-                 Do NOT add numbers, bullets, or explanations. \
-                 Do NOT merge or skip lines. \
-                 Keep blank lines as blank lines. \
-                 Output ONLY the translated lines, one per line.",
+                 Return EXACTLY {} lines. \
+                 CRITICAL: Do NOT repeat the same translation for different lines. \
+                 Do NOT add explanations or extra text. \
+                 Output ONLY the translations, one per line.",
                 target_name, source_lines.len()
             )
         } else {
@@ -106,7 +104,9 @@ impl OllamaTranslator {
             stream: false,
             options: Some(OllamaOptions {
                 temperature: 0.2,
-                num_predict: -1, // unlimited — let the model finish naturally
+                num_predict: -1,
+                repeat_penalty: 1.2,   // Penalty for repeating the same words
+                presence_penalty: 0.6, // Penalty for repeating topics/lines
             }),
         };
 
@@ -147,6 +147,8 @@ struct OllamaMessage {
 struct OllamaOptions {
     temperature: f32,
     num_predict: i32,
+    repeat_penalty: f32,
+    presence_penalty: f32,
 }
 
 #[derive(Deserialize)]
