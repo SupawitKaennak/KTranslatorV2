@@ -46,6 +46,9 @@ pub struct App {
     /// Empty = use built-in fallback list until Refresh succeeds
     gemini_models: Vec<GeminiModel>,
 
+    /// Persistent state for the settings window while open to prevent frame-reset bug.
+    settings_edit: Option<Arc<Mutex<Settings>>>,
+
     /// Fullscreen drag-to-select overlay (one at a time).
     crop_session: Option<Arc<Mutex<CropOverlayState>>>,
     crop_finish: Arc<Mutex<Option<CropOutcome>>>,
@@ -181,6 +184,7 @@ impl App {
             settings_fetch_models_pending: false,
             last_errors: std::collections::BTreeMap::new(),
             gemini_models: Vec::new(),
+            settings_edit: None,
             crop_session: None,
             crop_finish: Arc::new(Mutex::new(None)),
             capture: Arc::new(ScreenshotsCapture::new()),
@@ -579,7 +583,12 @@ impl App {
         }
 
         let model_choices = self.model_choices();
-        let settings_arc = Arc::new(Mutex::new(self.settings.clone()));
+        
+        // Use persistent settings_edit or initialize if missing (fallback)
+        if self.settings_edit.is_none() {
+            self.settings_edit = Some(Arc::new(Mutex::new(self.settings.clone())));
+        }
+        let settings_arc = self.settings_edit.as_ref().unwrap().clone();
         
         let resp = show_settings_window(ctx, settings_arc.clone(), model_choices);
 
@@ -592,11 +601,13 @@ impl App {
                 self.translator = create_translator(&self.settings);
                 self.last_errors.clear();
                 self.show_settings = false;
+                self.settings_edit = None; // Clean up
             }
         }
 
         if resp.close_clicked {
             self.show_settings = false;
+            self.settings_edit = None; // Clean up
         }
     }
 
@@ -734,6 +745,7 @@ impl eframe::App for App {
                         if ui.button("⚙").on_hover_text("Open Settings").clicked() {
                             self.show_settings = true;
                             self.settings_fetch_models_pending = true;
+                            self.settings_edit = Some(Arc::new(Mutex::new(self.settings.clone())));
                         }
                     });
                 });
