@@ -1743,6 +1743,7 @@ impl eframe::App for App {
                     model.add_slot();
                     self.slot_busy.push(false);
                     self.slot_processing.push(false);
+                    self.slot_status.push("Idle".to_string());
                     self.last_frame_hash.push(0);
                     self.overlay_hwnd_cache.push(Arc::new(std::sync::atomic::AtomicIsize::new(0)));
                 }
@@ -1765,6 +1766,7 @@ impl eframe::App for App {
                 model.slots.remove(idx);
                 self.slot_busy.remove(idx);
                 self.slot_processing.remove(idx);
+                self.slot_status.remove(idx);
                 self.last_frame_hash.remove(idx);
                 if idx < self.overlay_hwnd_cache.len() {
                     self.overlay_hwnd_cache.remove(idx);
