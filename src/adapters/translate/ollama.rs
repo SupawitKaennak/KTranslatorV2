@@ -106,7 +106,7 @@ impl OllamaTranslator {
             stream: false,
             options: Some(OllamaOptions {
                 temperature: 0.2,
-                num_predict: 4096,
+                num_predict: -1, // unlimited — let the model finish naturally
             }),
         };
 
@@ -146,7 +146,7 @@ struct OllamaMessage {
 #[derive(Serialize)]
 struct OllamaOptions {
     temperature: f32,
-    num_predict: u32,
+    num_predict: i32,
 }
 
 #[derive(Deserialize)]
