@@ -260,7 +260,7 @@ impl App {
             cc.egui_ctx.set_visuals(visuals);
         }
 
-        Self {
+        let app = Self {
             model: Arc::new(Mutex::new(AppModel::new_default())),
             settings,
             show_settings: false,
@@ -298,7 +298,20 @@ impl App {
             slot_last_langs: vec![(None, String::new())],
             error_dismiss_tx: err_tx,
             error_dismiss_rx: err_rx,
-        }
+        };
+
+        // Heartbeat thread: wakes up the UI every 200ms regardless of Windows
+        // event loop throttling. This ensures tick_background() keeps running
+        // even when a game is covering the main window.
+        let ctx_heartbeat = cc.egui_ctx.clone();
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(200));
+                ctx_heartbeat.request_repaint();
+            }
+        });
+
+        app
     }
 
     fn fallback_gemini_models() -> Vec<GeminiModel> {
@@ -849,7 +862,7 @@ impl App {
                     unsafe {
                         use std::ptr;
                         use windows::Win32::Foundation::COLORREF;
-                        use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
+                        use windows::Win32::UI::WindowsAndMessaging::*;
                         let title_w: Vec<u16> = format!("Frame Overlay {}\0", slot_id + 1)
                             .encode_utf16()
                             .collect();
@@ -860,20 +873,16 @@ impl App {
                             let raw = hwnd.0 as isize;
                             let cached = hwnd_cache.load(std::sync::atomic::Ordering::Relaxed);
                             if raw != 0 && raw != cached {
-                                use windows::Win32::UI::WindowsAndMessaging::*;
-                                
-                                let mut style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
-                                style &= !(WS_CAPTION.0 | WS_THICKFRAME.0 | WS_MINIMIZEBOX.0 | WS_MAXIMIZEBOX.0 | WS_SYSMENU.0);
-                                SetWindowLongW(hwnd, GWL_STYLE, style as i32);
-
+                                // 1. Set Extended Styles for Click-through and Topmost
                                 let mut ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
-                                ex_style |= WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0 | WS_EX_TOPMOST.0 | WS_EX_TOOLWINDOW.0;
+                                ex_style |= WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0 | WS_EX_TOPMOST.0;
                                 SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style as i32);
 
+                                // 2. CRITICAL: Tell Windows that Black (0,0,0) is Transparent
+                                // This is what fixes the black background.
                                 let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 0, LWA_COLORKEY);
-                                let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
                                 
-                                // Restore Display Affinity to hide overlay from capture
+                                // 3. Hide from capture to prevent feedback loops
                                 const WDA_EXCLUDEFROMCAPTURE: WINDOW_DISPLAY_AFFINITY = WINDOW_DISPLAY_AFFINITY(0x11);
                                 let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
                                 
@@ -994,7 +1003,7 @@ impl App {
         result
     }
 
-    fn tick_background(&mut self) {
+    fn tick_background(&mut self, ctx: &egui::Context) {
         // 0. Handle error dismissal from the error viewport
         while let Ok(_) = self.error_dismiss_rx.try_recv() {
             self.last_errors.clear();
@@ -1080,14 +1089,21 @@ impl App {
                     let mut model = self.model.lock();
                     let slot = &mut model.slots[slot_idx];
                     
-                    // If we've been unstable for > 500ms, STOP resetting the timer.
-                    // This allows the background thread to eventually proceed with translation.
-                    if now.saturating_sub(slot.stable_since_ms) < 500 {
+                    // Only reset the instability timer when transitioning FROM stable TO unstable.
+                    // If hash was already different (ongoing instability), let the timer keep running
+                    // so the background thread can eventually exceed the 200ms threshold and proceed.
+                    if slot.stable_hash == new_hash {
+                        // Hash didn't actually change from last known — this is stable
+                        slot.stable_since_ms = now;
+                    } else if slot.stable_hash != new_hash && slot.stable_since_ms == 0 {
+                        // First time seeing instability — start the timer
                         slot.stable_since_ms = now;
                     }
+                    // Otherwise: keep stable_since_ms as-is (timer keeps running)
+                    
                     slot.stable_hash = new_hash;
-                    // Check very aggressively until stable (100ms)
-                    slot.next_tick_at_ms = now.saturating_add(100);
+                    // Re-check very quickly (50ms) so forced capture triggers fast
+                    slot.next_tick_at_ms = now.saturating_add(50);
                 }
                 BgResult::WaitingDebounce { slot_idx } => {
                     self.slot_busy[slot_idx] = false;
@@ -1148,7 +1164,10 @@ impl App {
 
                     // Parse Gemini retryDelay (e.g. "27s") from 429 responses.
                     // Fall back to 30 s if not found.
-                    let retry_ms: u64 = {
+                    let retry_ms: u64 = if err.contains("timed out") {
+                        // Capture timeout — retry quickly
+                        1000
+                    } else {
                         let re_delay = err
                             .split('"')
                             .skip_while(|s| *s != "retryDelay")
@@ -1160,7 +1179,8 @@ impl App {
 
                     {
                         let mut model = self.model.lock();
-                        model.slots[slot_idx].next_tick_at_ms = now.saturating_add(retry_ms.max(10_000));
+                        let min_wait = if err.contains("timed out") { 500 } else { 10_000 };
+                        model.slots[slot_idx].next_tick_at_ms = now.saturating_add(retry_ms.max(min_wait));
                     }
 
                     // Reset frame hash so the retry tick actually re-runs OCR+translate
@@ -1253,10 +1273,10 @@ impl App {
             let tx = self.bg_tx.clone();
             let prev_hash = self.last_frame_hash[i];
 
-            // Debounce variables
+            let now = Self::now_ms();
             let stable_hash = slot.stable_hash;
             let stable_since_ms = slot.stable_since_ms;
-            let debounce_dur_ms = 400; // Lowered from 800ms for faster response in games
+            let debounce_dur_ms = 200; // Original was 800, using 200 for gaming
 
             let cache_arc = self.translation_cache.clone();
             let text_cache_arc = self.text_translation_cache.clone();
@@ -1273,22 +1293,26 @@ impl App {
                         let frame = capture.capture_rect(rect, display_id)?;
                         
                         let _ = tx.send(BgResult::StatusUpdate { slot_idx: i, status: "Hashing...".to_string() });
-                        // ...
                         let hash = smart_hash(&frame.data);
 
+                        // 1. Debounce state machine (Visual stability)
                         let is_unstable = hash != stable_hash;
                         let unstable_dur = now.saturating_sub(stable_since_ms);
 
                         if is_unstable && unstable_dur < 500 {
                             return Ok(BgResult::HashChanged { slot_idx: i, new_hash: hash });
                         }
+
                         if unstable_dur < 500 && now.saturating_sub(stable_since_ms) < debounce_dur_ms {
                             return Ok(BgResult::WaitingDebounce { slot_idx: i });
                         }
+
+                        // 2. Hash stable — did it change since the last translation?
                         if hash == prev_hash && prev_hash != 0 {
                             return Ok(BgResult::Unchanged { slot_idx: i });
                         }
 
+                        // 3. New stable scene — check frame-hash cache first.
                         let cache_key = (hash, source_lang.as_ref().map(|l| l.0.clone()), target_lang.0.clone());
                         {
                             let cache = cache_arc.lock();
@@ -1303,6 +1327,7 @@ impl App {
                             }
                         }
 
+                        // Signal heavy work starting (triggers UI spinner)
                         let _ = tx.send(BgResult::Translating { slot_idx: i });
 
                         let scale = 2u32;
@@ -1740,12 +1765,13 @@ impl eframe::App for App {
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Aggressively process results to prevent "Translating..." hang
-        self.tick_background();
+        self.tick_background(ctx);
 
-        // Force repaint if we are still busy translating
-        let is_any_busy = self.slot_busy.iter().any(|&b| b);
-        if is_any_busy {
-            ctx.request_repaint();
+        // Force repaint very frequently if ANY slot is enabled
+        // to keep the Windows event loop alive and capture flowing.
+        let any_enabled = self.model.lock().slots.iter().any(|s| s.enabled);
+        if any_enabled {
+            ctx.request_repaint_after(std::time::Duration::from_millis(16)); // ~60fps heartbeat
         }
 
         self.ui_error_popup(ctx);

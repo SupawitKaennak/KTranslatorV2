@@ -102,11 +102,12 @@ impl OllamaTranslator {
                 },
             ],
             stream: false,
-            options: Some(OllamaOptions {
-                temperature: 0.2,
-                num_predict: -1,
-                repeat_penalty: 1.2,   // Penalty for repeating the same words
-                presence_penalty: 0.6, // Penalty for repeating topics/lines
+    options: Some(OllamaOptions {
+                temperature: 0.1,      // Lower temp = faster/more stable
+                num_predict: 256,      // Limit length for speed (unlimited is slower)
+                repeat_penalty: 1.1,
+                top_k: 20,             // Focus on top 20 tokens (faster sampling)
+                top_p: 0.5,             // More focused sampling
             }),
         };
 
@@ -148,7 +149,8 @@ struct OllamaOptions {
     temperature: f32,
     num_predict: i32,
     repeat_penalty: f32,
-    presence_penalty: f32,
+    top_k: i32,
+    top_p: f32,
 }
 
 #[derive(Deserialize)]
