@@ -61,55 +61,28 @@ impl Translator for OllamaTranslator {
             _ => &s.0,
         });
 
-        // For multi-line: translate each line individually to guarantee alignment.
-        // Local models are unlimited, so multiple calls are fine.
-        if source_lines.len() > 1 {
-            let mut results = Vec::with_capacity(source_lines.len());
-            for (i, line) in source_lines.iter().enumerate() {
-                let trimmed = line.trim();
-                if trimmed.is_empty() {
-                    results.push(String::new());
-                    continue;
-                }
-
-                // Include surrounding lines as context (but only translate the target line)
-                let context_hint = if source_lines.len() > 1 {
-                    let prev = if i > 0 { source_lines[i - 1] } else { "" };
-                    let next = if i + 1 < source_lines.len() { source_lines[i + 1] } else { "" };
-                    format!(
-                        " Context — previous line: \"{}\", next line: \"{}\".",
-                        prev, next
-                    )
-                } else {
-                    String::new()
-                };
-
-                let system = format!(
-                    "Translate into {}. Output ONLY the translation, nothing else. No numbers, no bullet points, no explanations.{}",
-                    target_name, context_hint
-                );
-
-                let user = if let Some(sn) = src_name {
-                    format!("{} → {}: {}", sn, target_name, trimmed)
-                } else {
-                    trimmed.to_string()
-                };
-
-                let translated_line = self.call_ollama(&system, &user)?;
-                results.push(translated_line);
-            }
-            return Ok(results.join("\n"));
-        }
-
-        // Single line — simple translation
-        let system = format!(
-            "Translate into {}. Output ONLY the translation, nothing else.",
-            target_name
-        );
-        let user = if let Some(sn) = src_name {
-            format!("{} → {}: {}", sn, target_name, text.trim())
+        let system = if source_lines.len() > 1 {
+            format!(
+                "Translate each line into {}. \
+                 Return EXACTLY {} lines of translation. \
+                 Each input line must have exactly one output line. \
+                 Do NOT add numbers, bullets, or explanations. \
+                 Do NOT merge or skip lines. \
+                 Keep blank lines as blank lines. \
+                 Output ONLY the translated lines, one per line.",
+                target_name, source_lines.len()
+            )
         } else {
-            text.trim().to_string()
+            format!(
+                "Translate into {}. Output ONLY the translation, nothing else.",
+                target_name
+            )
+        };
+
+        let user = if let Some(sn) = src_name {
+            format!("Translate from {} to {}:\n\n{}", sn, target_name, text)
+        } else {
+            format!("Translate to {}:\n\n{}", target_name, text)
         };
 
         self.call_ollama(&system, &user)
@@ -151,10 +124,7 @@ impl OllamaTranslator {
         }
 
         let data: OllamaChatResponse = resp.json().context("parse ollama response")?;
-        // Take only the first non-empty line to prevent multi-line leakage
-        let content = data.message.content.trim();
-        let first_line = content.lines().next().unwrap_or(content).trim();
-        Ok(first_line.to_string())
+        Ok(data.message.content.trim().to_string())
     }
 }
 
