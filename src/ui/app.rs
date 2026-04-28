@@ -1402,6 +1402,10 @@ impl App {
 
                     // 5. Hit Translation API for TEXT-ONLY translation.
                     if let Some(t) = &translator {
+                        let _ = tx.send(BgResult::StatusUpdate { 
+                            slot_idx: i, 
+                            status: "Translating (waiting for AI)...".to_string() 
+                        });
                         let translated =
                             t.translate(&ocr_text, source_lang.as_ref(), &target_lang)?;
 

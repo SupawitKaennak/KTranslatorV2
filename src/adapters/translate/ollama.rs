@@ -14,7 +14,7 @@ pub struct OllamaTranslator {
 impl OllamaTranslator {
     pub fn new(url: String, model: String) -> Result<Self> {
         let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(60)) // Local models can be slow
+            .timeout(std::time::Duration::from_secs(300)) // Local models can be very slow on CPU
             .build()
             .context("build http client")?;
         Ok(Self {
