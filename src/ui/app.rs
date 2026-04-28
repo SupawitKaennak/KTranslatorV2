@@ -1473,120 +1473,153 @@ impl App {
                 }
             }
         }
-        let mut open = true;
-        egui::Window::new("Settings")
-            .open(&mut open)
-            .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Provider:");
-                    ui.selectable_value(
-                        &mut self.settings.provider,
-                        TranslationProvider::Gemini,
-                        "Gemini",
-                    );
-                    ui.selectable_value(
-                        &mut self.settings.provider,
-                        TranslationProvider::Groq,
-                        "Groq",
-                    );
-                    ui.selectable_value(
-                        &mut self.settings.provider,
-                        TranslationProvider::Ollama,
-                        "Ollama (Offline)",
-                    );
-                });
-                ui.separator();
 
-                match self.settings.provider {
-                    TranslationProvider::Gemini => {
-                        ui.label("Gemini (API key)");
-                        ui.horizontal(|ui| {
-                            ui.label("model");
-                            let choices = self.model_choices();
-                            let mut current_idx = choices
-                                .iter()
-                                .position(|m| m.id == self.settings.gemini_model)
-                                .unwrap_or(0);
-                            egui::ComboBox::from_id_salt("gemini_model_dropdown")
-                                .width(250.0)
-                                .selected_text(
-                                    choices
-                                        .get(current_idx)
-                                        .map(|m| m.display_name.as_str())
-                                        .unwrap_or(self.settings.gemini_model.as_str()),
-                                )
-                                .show_ui(ui, |ui| {
-                                    for (i, m) in choices.iter().enumerate() {
-                                        ui.selectable_value(&mut current_idx, i, &m.display_name);
-                                    }
-                                });
-                            if let Some(sel) = choices.get(current_idx) {
-                                self.settings.gemini_model = sel.id.clone();
-                            }
-                            if ui.button("Refresh").clicked() {
-                                match GeminiTranslator::list_models(&self.settings.gemini_api_key) {
-                                    Ok(models) => {
-                                        self.gemini_models = models;
-                                        self.last_errors.clear();
-                                    }
-                                    Err(e) => {
-                                        self.last_errors.insert(999, format!("{e:#}"));
-                                    }
-                                }
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("api_key");
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.settings.gemini_api_key)
-                                    .password(true),
-                            );
-                        });
-                    }
-                    TranslationProvider::Groq => {
-                        ui.label("Groq (High speed, Free)");
-                        ui.horizontal(|ui| {
-                            ui.label("model");
-                            ui.text_edit_singleline(&mut self.settings.groq_model);
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("api_key");
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.settings.groq_api_key)
-                                    .password(true),
-                            );
-                        });
-                        ui.hyperlink_to("Get Groq API Key", "https://console.groq.com/keys");
-                    }
-                    TranslationProvider::Ollama => {
-                        ui.label("Ollama (Local/Offline)");
-                        ui.horizontal(|ui| {
-                            ui.label("Server URL");
-                            ui.text_edit_singleline(&mut self.settings.ollama_url);
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Model Name");
-                            ui.text_edit_singleline(&mut self.settings.ollama_model);
-                        });
-                        ui.small(
-                            "Make sure Ollama is running and you have run 'ollama pull <model>'",
+        // Clone data into shared state for the viewport closure
+        let settings_arc: Arc<Mutex<Settings>> = Arc::new(Mutex::new(self.settings.clone()));
+        let model_choices = self.model_choices();
+        let close_flag: Arc<std::sync::atomic::AtomicBool> =
+            Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let save_flag: Arc<std::sync::atomic::AtomicBool> =
+            Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        let close_flag2 = close_flag.clone();
+        let save_flag2 = save_flag.clone();
+        let settings_arc2 = settings_arc.clone();
+        let viewport_id = egui::ViewportId::from_hash_of("settings_viewport");
+
+        ctx.show_viewport_immediate(
+            viewport_id,
+            egui::ViewportBuilder::default()
+                .with_title("KTranslator - Settings")
+                .with_inner_size([500.0, 350.0])
+                .with_resizable(true)
+                .with_always_on_top(),
+            move |ctx, _| {
+                if ctx.input(|i| i.viewport().close_requested()) {
+                    close_flag2.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let mut settings = settings_arc2.lock();
+
+                    ui.heading("⚙ Settings");
+                    ui.add_space(8.0);
+
+                    ui.horizontal(|ui| {
+                        ui.label("Provider:");
+                        ui.selectable_value(
+                            &mut settings.provider,
+                            TranslationProvider::Gemini,
+                            "Gemini",
                         );
-                    }
-                }
+                        ui.selectable_value(
+                            &mut settings.provider,
+                            TranslationProvider::Groq,
+                            "Groq",
+                        );
+                        ui.selectable_value(
+                            &mut settings.provider,
+                            TranslationProvider::Ollama,
+                            "Ollama (Offline)",
+                        );
+                    });
+                    ui.separator();
 
-                ui.add_space(8.0);
-                ui.separator();
-                if ui.button("Save & Apply").clicked() {
-                    if let Err(e) = save_settings(&self.settings) {
-                        self.last_errors.insert(999, format!("{e:#}"));
-                    } else {
-                        // Recreate the translator adapter with new settings
-                        self.translator = Self::create_translator(&self.settings);
-                        self.last_errors.clear();
+                    match settings.provider {
+                        TranslationProvider::Gemini => {
+                            ui.label("Gemini (API key)");
+                            ui.horizontal(|ui| {
+                                ui.label("model");
+                                let mut current_idx = model_choices
+                                    .iter()
+                                    .position(|m| m.id == settings.gemini_model)
+                                    .unwrap_or(0);
+                                egui::ComboBox::from_id_salt("gemini_model_dropdown")
+                                    .width(250.0)
+                                    .selected_text(
+                                        model_choices
+                                            .get(current_idx)
+                                            .map(|m| m.display_name.as_str())
+                                            .unwrap_or(settings.gemini_model.as_str()),
+                                    )
+                                    .show_ui(ui, |ui| {
+                                        for (i, m) in model_choices.iter().enumerate() {
+                                            ui.selectable_value(&mut current_idx, i, &m.display_name);
+                                        }
+                                    });
+                                if let Some(sel) = model_choices.get(current_idx) {
+                                    settings.gemini_model = sel.id.clone();
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("api_key");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut settings.gemini_api_key)
+                                        .password(true),
+                                );
+                            });
+                        }
+                        TranslationProvider::Groq => {
+                            ui.label("Groq (High speed, Free)");
+                            ui.horizontal(|ui| {
+                                ui.label("model");
+                                ui.text_edit_singleline(&mut settings.groq_model);
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("api_key");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut settings.groq_api_key)
+                                        .password(true),
+                                );
+                            });
+                            ui.hyperlink_to("Get Groq API Key", "https://console.groq.com/keys");
+                        }
+                        TranslationProvider::Ollama => {
+                            ui.label("Ollama (Local/Offline)");
+                            ui.horizontal(|ui| {
+                                ui.label("Server URL");
+                                ui.text_edit_singleline(&mut settings.ollama_url);
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Model Name");
+                                ui.text_edit_singleline(&mut settings.ollama_model);
+                            });
+                            ui.small(
+                                "Make sure Ollama is running and you have run 'ollama pull <model>'",
+                            );
+                        }
                     }
-                }
-            });
-        self.show_settings = open;
+
+                    ui.add_space(12.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+
+                    if ui.button(egui::RichText::new("💾 Save & Apply").size(16.0)).clicked() {
+                        save_flag2.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                });
+            },
+        );
+
+        // Write back settings changes
+        let updated_settings = settings_arc.lock().clone();
+        self.settings = updated_settings;
+
+        // Handle Save
+        if save_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Err(e) = save_settings(&self.settings) {
+                self.last_errors.insert(999, format!("{e:#}"));
+            } else {
+                self.translator = Self::create_translator(&self.settings);
+                self.last_errors.clear();
+                self.show_settings = false;
+            }
+        }
+
+        // Handle Close
+        if close_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            self.show_settings = false;
+        }
     }
 
     fn ui_error_popup(&mut self, ctx: &egui::Context) {
