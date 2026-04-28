@@ -669,6 +669,7 @@ impl App {
                     .with_transparent(true)
                     .with_always_on_top()
                     .with_mouse_passthrough(true)
+                    .with_active(false) // CRITICAL: Prevent focus theft and black boxes
                     .with_inner_size(egui::vec2(r.w as f32, r.h as f32))
                     .with_position(egui::pos2(r.x as f32, r.y as f32)),
                 move |ctx, class| {
@@ -848,16 +849,7 @@ impl App {
                     unsafe {
                         use std::ptr;
                         use windows::Win32::Foundation::COLORREF;
-                        use windows::Win32::UI::WindowsAndMessaging::{
-                            FindWindowW, SetLayeredWindowAttributes, LWA_COLORKEY,
-                            SetWindowDisplayAffinity, WINDOW_DISPLAY_AFFINITY,
-                        };
-                        // WDA_EXCLUDEFROMCAPTURE = 0x11: window is visible to the user
-                        // but excluded from screen capture / screenshots APIs. This breaks
-                        // the self-referencing loop where the overlay's own translated text
-                        // was being captured, OCR-read, and re-translated into garbled output.
-                        const WDA_EXCLUDEFROMCAPTURE: WINDOW_DISPLAY_AFFINITY =
-                            WINDOW_DISPLAY_AFFINITY(0x00000011);
+                        use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
                         let title_w: Vec<u16> = format!("Frame Overlay {}\0", slot_id + 1)
                             .encode_utf16()
                             .collect();
@@ -868,16 +860,23 @@ impl App {
                             let raw = hwnd.0 as isize;
                             let cached = hwnd_cache.load(std::sync::atomic::Ordering::Relaxed);
                             if raw != 0 && raw != cached {
-                                // HWND is new or changed — (re-)apply color key
-                                let _ = SetLayeredWindowAttributes(
-                                    hwnd,
-                                    COLORREF(0x000000), // pure black → transparent
-                                    0,
-                                    LWA_COLORKEY,
-                                );
-                                // Exclude overlay from screen capture so its translated
-                                // text is never captured and fed back into OCR.
+                                use windows::Win32::UI::WindowsAndMessaging::*;
+                                
+                                let mut style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+                                style &= !(WS_CAPTION.0 | WS_THICKFRAME.0 | WS_MINIMIZEBOX.0 | WS_MAXIMIZEBOX.0 | WS_SYSMENU.0);
+                                SetWindowLongW(hwnd, GWL_STYLE, style as i32);
+
+                                let mut ex_style = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
+                                ex_style |= WS_EX_LAYERED.0 | WS_EX_TRANSPARENT.0 | WS_EX_TOPMOST.0 | WS_EX_TOOLWINDOW.0;
+                                SetWindowLongW(hwnd, GWL_EXSTYLE, ex_style as i32);
+
+                                let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 0, LWA_COLORKEY);
+                                let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+                                
+                                // Restore Display Affinity to hide overlay from capture
+                                const WDA_EXCLUDEFROMCAPTURE: WINDOW_DISPLAY_AFFINITY = WINDOW_DISPLAY_AFFINITY(0x11);
                                 let _ = SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE);
+                                
                                 hwnd_cache.store(raw, std::sync::atomic::Ordering::Relaxed);
                             }
                         }
@@ -1257,223 +1256,177 @@ impl App {
             // Debounce variables
             let stable_hash = slot.stable_hash;
             let stable_since_ms = slot.stable_since_ms;
-            let debounce_dur_ms = 800; // minimum time screen must be stable before OCR
+            let debounce_dur_ms = 400; // Lowered from 800ms for faster response in games
 
             let cache_arc = self.translation_cache.clone();
             let text_cache_arc = self.text_translation_cache.clone();
             let language_version = slot.language_version;
             
+            let tx_inner = tx.clone();
+            let ctx_cp = ctx.clone();
             std::thread::spawn(move || {
                 let _ = tx.send(BgResult::StatusUpdate { slot_idx: i, status: "Capturing...".to_string() });
-                let result = (|| -> anyhow::Result<BgResult> {
-                    let frame = capture.capture_rect(rect, display_id)?;
-                    
-                    let _ = tx.send(BgResult::StatusUpdate { slot_idx: i, status: "Hasing...".to_string() });
+                let tx_outer = tx.clone();
+                let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                    let tx = tx_inner;
+                    let result = (|| -> anyhow::Result<BgResult> {
+                        let frame = capture.capture_rect(rect, display_id)?;
+                        
+                        let _ = tx.send(BgResult::StatusUpdate { slot_idx: i, status: "Hashing...".to_string() });
+                        // ...
+                        let hash = smart_hash(&frame.data);
 
-                    // Hash BEFORE thresholding so the debounce reflects actual screen
-                    // content changes rather than BW post-processing artifacts.
-                    let hash = smart_hash(&frame.data);
+                        let is_unstable = hash != stable_hash;
+                        let unstable_dur = now.saturating_sub(stable_since_ms);
 
-                    // 1. Debounce state machine (Visual stability)
-                    let is_unstable = hash != stable_hash;
-                    let unstable_dur = now.saturating_sub(stable_since_ms);
-
-                    if is_unstable && unstable_dur < 500 {
-                        return Ok(BgResult::HashChanged { slot_idx: i, new_hash: hash });
-                    }
-
-                    if unstable_dur < 500 && now.saturating_sub(stable_since_ms) < debounce_dur_ms {
-                        return Ok(BgResult::WaitingDebounce { slot_idx: i });
-                    }
-
-                    // 2. Hash stable — did it change since the last translation?
-                    if hash == prev_hash && prev_hash != 0 {
-                        return Ok(BgResult::Unchanged { slot_idx: i });
-                    }
-
-                    // 3. New stable scene — check frame-hash cache first.
-                    let cache_key = (hash, source_lang.as_ref().map(|l| l.0.clone()), target_lang.0.clone());
-                    {
-                        let cache = cache_arc.lock();
-                        if let Some((ocr, tra)) = cache.get(&cache_key) {
-                            return Ok(BgResult::CacheHit {
-                                slot_idx: i,
-                                language_version,
-                                ocr_text: ocr.clone(),
-                                translated: tra.clone(),
-                                frame_hash: hash,
-                            });
+                        if is_unstable && unstable_dur < 500 {
+                            return Ok(BgResult::HashChanged { slot_idx: i, new_hash: hash });
                         }
-                    }
+                        if unstable_dur < 500 && now.saturating_sub(stable_since_ms) < debounce_dur_ms {
+                            return Ok(BgResult::WaitingDebounce { slot_idx: i });
+                        }
+                        if hash == prev_hash && prev_hash != 0 {
+                            return Ok(BgResult::Unchanged { slot_idx: i });
+                        }
 
-                    // Signal heavy work starting (triggers UI spinner)
-                    let _ = tx.send(BgResult::Translating { slot_idx: i });
-
-                    // ── Image Pre-processing for OCR ───────────────────────
-                    // Step A: 2x Upscale (bilinear interpolation) — makes
-                    // small or stylised manga fonts much easier for the OCR
-                    // engine to recognise.
-                    let scale = 2u32;
-                    let new_w = frame.width * scale;
-                    let new_h = frame.height * scale;
-                    let mut upscaled = vec![0u8; (new_w * new_h * 4) as usize];
-                    for dst_y in 0..new_h {
-                        for dst_x in 0..new_w {
-                            // Map destination pixel to source (fractional)
-                            let src_xf = dst_x as f32 / scale as f32;
-                            let src_yf = dst_y as f32 / scale as f32;
-                            let x0 = (src_xf as u32).min(frame.width - 1);
-                            let y0 = (src_yf as u32).min(frame.height - 1);
-                            let x1 = (x0 + 1).min(frame.width - 1);
-                            let y1 = (y0 + 1).min(frame.height - 1);
-                            let fx = src_xf - x0 as f32;
-                            let fy = src_yf - y0 as f32;
-                            let idx = |x: u32, y: u32| (y * frame.width + x) as usize * 4;
-                            let dst_idx = (dst_y * new_w + dst_x) as usize * 4;
-                            for c in 0..4 {
-                                let v00 = frame.data[idx(x0, y0) + c] as f32;
-                                let v10 = frame.data[idx(x1, y0) + c] as f32;
-                                let v01 = frame.data[idx(x0, y1) + c] as f32;
-                                let v11 = frame.data[idx(x1, y1) + c] as f32;
-                                let top = v00 + (v10 - v00) * fx;
-                                let bot = v01 + (v11 - v01) * fx;
-                                upscaled[dst_idx + c] = (top + (bot - top) * fy) as u8;
+                        let cache_key = (hash, source_lang.as_ref().map(|l| l.0.clone()), target_lang.0.clone());
+                        {
+                            let cache = cache_arc.lock();
+                            if let Some((ocr, tra)) = cache.get(&cache_key) {
+                                return Ok(BgResult::CacheHit {
+                                    slot_idx: i,
+                                    language_version,
+                                    ocr_text: ocr.clone(),
+                                    translated: tra.clone(),
+                                    frame_hash: hash,
+                                });
                             }
                         }
-                    }
-                    let preprocessed_frame = FrameRgba {
-                        width: new_w,
-                        height: new_h,
-                        data: upscaled,
-                    };
 
-                    // 4. Local OCR with layout (Offline)
-                    let _ = tx.send(BgResult::StatusUpdate { slot_idx: i, status: "OCR...".to_string() });
-                    let mut ocr_lines = windows_ocr.recognize_lines(&preprocessed_frame, source_lang.as_ref())?;
+                        let _ = tx.send(BgResult::Translating { slot_idx: i });
 
-                    // Scale bounding boxes back to original screen coordinates
-                    let inv_scale = 1.0 / scale as f32;
-                    for line in &mut ocr_lines {
-                        line.x *= inv_scale;
-                        line.y *= inv_scale;
-                        line.w *= inv_scale;
-                        line.h *= inv_scale;
-                    }
-
-                    let ocr_text = ocr_lines
-                        .iter()
-                        .map(|l| l.text.as_str())
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    let ocr_text = ocr_text.trim().to_string();
-
-
-                    if ocr_text.is_empty() {
-                        return Ok(BgResult::Done {
-                            slot_idx: i,
-                            language_version,
-                            ocr_text: String::new(),
-                            translated: String::new(),
-                            frame_hash: hash,
-                            ocr_lines: Vec::new(),
-                        });
-                    }
-
-                    // 4b. Fast-path: same source == target language — no API needed.
-                    if source_lang.as_ref().map(|s| s.0 == target_lang.0).unwrap_or(false) {
-                        let mut cache = cache_arc.lock();
-                        cache.insert(cache_key, (ocr_text.clone(), ocr_text.clone()));
-                        return Ok(BgResult::Done {
-                            slot_idx: i,
-                            language_version,
-                            ocr_text: ocr_text.clone(),
-                            translated: ocr_text,
-                            frame_hash: hash,
-                            ocr_lines,
-                        });
-                    }
-
-                    // 4c. Text-level cache: same OCR text seen before → reuse translation.
-                    {
-                        let text_hash = {
-                            let mut h: u64 = 0xcbf29ce484222325;
-                            for b in ocr_text.as_bytes() {
-                                h ^= *b as u64;
-                                h = h.wrapping_mul(0x100000001b3);
+                        let scale = 2u32;
+                        let new_w = frame.width * scale;
+                        let new_h = frame.height * scale;
+                        let mut upscaled = vec![0u8; (new_w * new_h * 4) as usize];
+                        for dst_y in 0..new_h {
+                            for dst_x in 0..new_w {
+                                let src_xf = dst_x as f32 / scale as f32;
+                                let src_yf = dst_y as f32 / scale as f32;
+                                let x0 = (src_xf as u32).min(frame.width - 1);
+                                let y0 = (src_yf as u32).min(frame.height - 1);
+                                let x1 = (x0 + 1).min(frame.width - 1);
+                                let y1 = (y0 + 1).min(frame.height - 1);
+                                let fx = src_xf - x0 as f32;
+                                let fy = src_yf - y0 as f32;
+                                let idx = |x: u32, y: u32| (y * frame.width + x) as usize * 4;
+                                let dst_idx = (dst_y * new_w + dst_x) as usize * 4;
+                                for c in 0..4 {
+                                    let v00 = frame.data[idx(x0, y0) + c] as f32;
+                                    let v10 = frame.data[idx(x1, y0) + c] as f32;
+                                    let v01 = frame.data[idx(x0, y1) + c] as f32;
+                                    let v11 = frame.data[idx(x1, y1) + c] as f32;
+                                    let top = v00 + (v10 - v00) * fx;
+                                    let bot = v01 + (v11 - v01) * fx;
+                                    upscaled[dst_idx + c] = (top + (bot - top) * fy) as u8;
+                                }
                             }
-                            h
+                        }
+                        let preprocessed_frame = FrameRgba {
+                            width: new_w,
+                            height: new_h,
+                            data: upscaled,
                         };
-                        let text_cache_key = (text_hash, source_lang.as_ref().map(|l| l.0.clone()), target_lang.0.clone());
-                        // Clone the translation out before releasing the guard
-                        let cached = {
-                            let text_cache = text_cache_arc.lock();
-                            text_cache.get(&text_cache_key).cloned()
-                        };
-                        if let Some(cached_trans) = cached {
-                            let mut cache = cache_arc.lock();
-                            cache.insert(cache_key, (ocr_text.clone(), cached_trans.clone()));
+
+                        let _ = tx.send(BgResult::StatusUpdate { slot_idx: i, status: "OCR...".to_string() });
+                        let mut ocr_lines = windows_ocr.recognize_lines(&preprocessed_frame, source_lang.as_ref())?;
+
+                        let inv_scale = 1.0 / scale as f32;
+                        for line in &mut ocr_lines {
+                            line.x *= inv_scale; line.y *= inv_scale; line.w *= inv_scale; line.h *= inv_scale;
+                        }
+
+                        let ocr_text = ocr_lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n").trim().to_string();
+
+                        if ocr_text.is_empty() {
                             return Ok(BgResult::Done {
                                 slot_idx: i,
                                 language_version,
-                                ocr_text,
-                                translated: cached_trans,
+                                ocr_text: String::new(),
+                                translated: String::new(),
                                 frame_hash: hash,
-                                ocr_lines,
+                                ocr_lines: Vec::new(),
                             });
                         }
-                    }
 
-                    // 5. Hit Translation API for TEXT-ONLY translation.
-                    if let Some(t) = &translator {
-                        let _ = tx.send(BgResult::StatusUpdate { 
-                            slot_idx: i, 
-                            status: "Translating (waiting for AI)...".to_string() 
-                        });
-                        let translated =
-                            t.translate(&ocr_text, source_lang.as_ref(), &target_lang)?;
+                        if source_lang.as_ref().map(|s| s.0 == target_lang.0).unwrap_or(false) {
+                            let mut cache = cache_arc.lock();
+                            cache.insert(cache_key, (ocr_text.clone(), ocr_text.clone()));
+                            return Ok(BgResult::Done {
+                                slot_idx: i, language_version, ocr_text: ocr_text.clone(), translated: ocr_text, frame_hash: hash, ocr_lines,
+                            });
+                        }
 
-                        // Save into both caches so we never re-translate the same text.
                         {
                             let text_hash = {
                                 let mut h: u64 = 0xcbf29ce484222325;
-                                for b in ocr_text.as_bytes() {
-                                    h ^= *b as u64;
-                                    h = h.wrapping_mul(0x100000001b3);
-                                }
+                                for b in ocr_text.as_bytes() { h ^= *b as u64; h = h.wrapping_mul(0x100000001b3); }
                                 h
                             };
                             let text_cache_key = (text_hash, source_lang.as_ref().map(|l| l.0.clone()), target_lang.0.clone());
-                            let mut frame_cache = cache_arc.lock();
-                            frame_cache.insert(cache_key, (ocr_text.clone(), translated.clone()));
-                            drop(frame_cache);
-                            let mut text_cache = text_cache_arc.lock();
-                            text_cache.insert(text_cache_key, translated.clone());
+                            let cached = { let text_cache = text_cache_arc.lock(); text_cache.get(&text_cache_key).cloned() };
+                            if let Some(cached_trans) = cached {
+                                let mut cache = cache_arc.lock();
+                                cache.insert(cache_key, (ocr_text.clone(), cached_trans.clone()));
+                                return Ok(BgResult::Done {
+                                    slot_idx: i, language_version, ocr_text, translated: cached_trans, frame_hash: hash, ocr_lines,
+                                });
+                            }
                         }
 
-                        Ok(BgResult::Done {
-                            slot_idx: i,
-                            language_version,
-                            ocr_text,
-                            translated,
-                            frame_hash: hash,
-                            ocr_lines,
-                        })
-                    } else {
-                        anyhow::bail!("Translation provider not configured or API key missing — click ⚙ to check settings");
+                        if let Some(t) = &translator {
+                            let _ = tx.send(BgResult::StatusUpdate { slot_idx: i, status: "Translating (waiting for AI)...".to_string() });
+                            let translated = t.translate(&ocr_text, source_lang.as_ref(), &target_lang)?;
+                            {
+                                let text_hash = {
+                                    let mut h: u64 = 0xcbf29ce484222325;
+                                    for b in ocr_text.as_bytes() { h ^= *b as u64; h = h.wrapping_mul(0x100000001b3); }
+                                    h
+                                };
+                                let text_cache_key = (text_hash, source_lang.as_ref().map(|l| l.0.clone()), target_lang.0.clone());
+                                let mut frame_cache = cache_arc.lock();
+                                frame_cache.insert(cache_key, (ocr_text.clone(), translated.clone()));
+                                drop(frame_cache);
+                                let mut text_cache = text_cache_arc.lock();
+                                text_cache.insert(text_cache_key, translated.clone());
+                            }
+                            Ok(BgResult::Done { slot_idx: i, language_version, ocr_text, translated, frame_hash: hash, ocr_lines })
+                        } else {
+                            anyhow::bail!("Translation provider not configured or API key missing — click ⚙ to check settings");
+                        }
+                    })();
+                    
+                    match result {
+                        Ok(res) => { let _ = tx.send(res); }
+                        Err(e) => {
+                            let _ = tx.send(BgResult::Error { 
+                                slot_idx: i, 
+                                language_version, 
+                                err: format!("{e:#}") 
+                            });
+                        }
                     }
-                })();
+                }));
 
-                match result {
-                    Ok(bg_res) => {
-                        let _ = tx.send(bg_res);
-                    }
-                    Err(e) => {
-                        let _ = tx.send(BgResult::Error { 
-                            slot_idx: i, 
-                            language_version, 
-                            err: format!("{e:#}") 
-                        });
-                    }
+                // WAKE UP the UI thread
+                ctx_cp.request_repaint();
+
+                if res.is_err() {
+                    let _ = tx_outer.send(BgResult::Error {
+                        slot_idx: i,
+                        language_version,
+                        err: "Background thread panicked (system error)".to_string(),
+                    });
                 }
             });
         }
@@ -1786,7 +1739,15 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Aggressively process results to prevent "Translating..." hang
         self.tick_background();
+
+        // Force repaint if we are still busy translating
+        let is_any_busy = self.slot_busy.iter().any(|&b| b);
+        if is_any_busy {
+            ctx.request_repaint();
+        }
+
         self.ui_error_popup(ctx);
 
         if let Some(sess) = &self.crop_session {
