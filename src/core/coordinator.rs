@@ -56,12 +56,14 @@ impl BackgroundCoordinator {
                         if language_version != slot.language_version {
                             runtime.busy = false;
                             runtime.processing = false;
+                            runtime.first_unstable_at = 0; // Reset
                             slot.next_tick_at_ms = 0;
                             continue;
                         }
 
                         runtime.busy = false;
                         runtime.processing = false;
+                        runtime.first_unstable_at = 0; // Reset on success
                         runtime.status = "Idle".to_string();
                         runtime.last_hash = frame_hash;
 
@@ -100,6 +102,7 @@ impl BackgroundCoordinator {
                     if let Some(runtime) = slots_runtime.get_mut(slot_idx) {
                         runtime.busy = false;
                         runtime.status = "Idle".to_string();
+                        runtime.first_unstable_at = 0; // Reset
                     }
                     let now = Self::now_ms();
                     let mut model = model_arc.lock();
@@ -109,14 +112,19 @@ impl BackgroundCoordinator {
                 }
                 BgResult::HashChanged { slot_idx, new_hash } => {
                     let mut model = model_arc.lock();
+                    let now = Self::now_ms();
                     if let Some(slot) = model.slots.get_mut(slot_idx) {
                         slot.stable_hash = new_hash;
-                        slot.stable_since_ms = Self::now_ms();
-                        slot.next_tick_at_ms = slot.stable_since_ms.saturating_add(150);
+                        slot.stable_since_ms = now;
+                        slot.next_tick_at_ms = now.saturating_add(150);
                     }
                     if let Some(runtime) = slots_runtime.get_mut(slot_idx) {
                         runtime.busy = false;
                         runtime.status = "Settling...".to_string();
+                        // Initialize first_unstable_at if it's 0
+                        if runtime.first_unstable_at == 0 {
+                            runtime.first_unstable_at = now;
+                        }
                     }
                 }
                 BgResult::WaitingDebounce { slot_idx } => {
@@ -145,6 +153,7 @@ impl BackgroundCoordinator {
 
                         runtime.busy = false;
                         runtime.status = "Idle (Cached)".to_string();
+                        runtime.first_unstable_at = 0; // Reset
                         runtime.last_hash = frame_hash;
 
                         slot.last_ocr_text = ocr_text;
@@ -276,6 +285,7 @@ impl BackgroundCoordinator {
             let language_version = slot.language_version;
             let cache_arc = translation_cache.clone();
             let text_cache_arc = text_translation_cache.clone();
+            let first_unstable_at = slots_runtime[i].first_unstable_at;
 
             std::thread::spawn(move || {
                 let _ = tx.send(BgResult::StatusUpdate { slot_idx: i, status: "Capturing...".to_string() });
@@ -288,13 +298,21 @@ impl BackgroundCoordinator {
                         let hash = smart_hash(&frame.data);
                         let now = Self::now_ms();
 
-                        if hash != stable_hash && now.saturating_sub(stable_since_ms) < 500 {
+                        // Stability Logic
+                        let is_changing = hash != stable_hash;
+                        let unstable_dur = now.saturating_sub(stable_since_ms);
+                        
+                        // If we've been unstable for a long time (e.g. 1.5s), FORCE proceed.
+                        let unstable_since_start = if first_unstable_at == 0 { 0 } else { now.saturating_sub(first_unstable_at) };
+                        let force_proceed = unstable_since_start > 1500; 
+
+                        if is_changing && !force_proceed && unstable_dur < 500 {
                             return Ok(BgResult::HashChanged { slot_idx: i, new_hash: hash });
                         }
-                        if now.saturating_sub(stable_since_ms) < 400 {
+                        if !force_proceed && unstable_dur < 400 {
                             return Ok(BgResult::WaitingDebounce { slot_idx: i });
                         }
-                        if hash == prev_hash && prev_hash != 0 {
+                        if hash == prev_hash && prev_hash != 0 && !force_proceed {
                             return Ok(BgResult::Unchanged { slot_idx: i });
                         }
 
@@ -310,32 +328,22 @@ impl BackgroundCoordinator {
 
                         let _ = tx_inner.send(BgResult::Translating { slot_idx: i });
                         
-                        // Upscaling logic
+                        // FAST UPSCALING: Use a simple sampling loop (Nearest Neighbor) 
+                        // instead of heavy bilinear interpolation. This is much faster
+                        // during gameplay and sufficient for Windows OCR.
                         let scale = 2u32;
                         let new_w = frame.width * scale;
                         let new_h = frame.height * scale;
                         let mut upscaled = vec![0u8; (new_w * new_h * 4) as usize];
                         for dst_y in 0..new_h {
+                            let src_y = dst_y / scale;
+                            let src_row_start = (src_y * frame.width) as usize * 4;
+                            let dst_row_start = (dst_y * new_w) as usize * 4;
                             for dst_x in 0..new_w {
-                                let src_xf = dst_x as f32 / scale as f32;
-                                let src_yf = dst_y as f32 / scale as f32;
-                                let x0 = (src_xf as u32).min(frame.width - 1);
-                                let y0 = (src_yf as u32).min(frame.height - 1);
-                                let x1 = (x0 + 1).min(frame.width - 1);
-                                let y1 = (y0 + 1).min(frame.height - 1);
-                                let fx = src_xf - x0 as f32;
-                                let fy = src_yf - y0 as f32;
-                                let idx = |x: u32, y: u32| (y * frame.width + x) as usize * 4;
-                                let dst_idx = (dst_y * new_w + dst_x) as usize * 4;
-                                for c in 0..4 {
-                                    let v00 = frame.data[idx(x0, y0) + c] as f32;
-                                    let v10 = frame.data[idx(x1, y0) + c] as f32;
-                                    let v01 = frame.data[idx(x0, y1) + c] as f32;
-                                    let v11 = frame.data[idx(x1, y1) + c] as f32;
-                                    let top = v00 + (v10 - v00) * fx;
-                                    let bot = v01 + (v11 - v01) * fx;
-                                    upscaled[dst_idx + c] = (top + (bot - top) * fy) as u8;
-                                }
+                                let src_x = dst_x / scale;
+                                let src_idx = src_row_start + (src_x as usize * 4);
+                                let dst_idx = dst_row_start + (dst_x as usize * 4);
+                                upscaled[dst_idx..dst_idx+4].copy_from_slice(&frame.data[src_idx..src_idx+4]);
                             }
                         }
                         let preprocessed_frame = FrameRgba { width: new_w, height: new_h, data: upscaled };

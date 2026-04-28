@@ -68,6 +68,9 @@ pub struct SlotRuntimeState {
     pub overlay_hwnd: Arc<std::sync::atomic::AtomicIsize>,
     /// Track language changes to invalidate caches
     pub last_langs: (Option<String>, String),
+    /// Time when the screen first became unstable. 
+    /// Used to force a translation if it never settles (e.g. in games).
+    pub first_unstable_at: u64,
 }
 
 impl SlotRuntimeState {
@@ -79,6 +82,7 @@ impl SlotRuntimeState {
             last_hash: 0,
             overlay_hwnd: Arc::new(std::sync::atomic::AtomicIsize::new(0)),
             last_langs: (None, String::new()),
+            first_unstable_at: 0,
         }
     }
 }
@@ -88,18 +92,18 @@ impl SlotRuntimeState {
 pub fn smart_hash(data: &[u8]) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     
-    // Sample every 4th pixel (16 bytes) for a balance of speed and precision
-    let step: usize = 16;
+    // Use a larger step (32 bytes = 8 pixels) for gaming performance.
+    // Most text blocks are large enough that this still captures changes.
+    let step: usize = 32;
     let mut i = 0;
     while i + 2 < data.len() {
-        let r = data[i] as f32;
-        let g = data[i+1] as f32;
-        let b = data[i+2] as f32;
+        // Quantize each channel to 3 bits (8 levels) to ignore compression noise and dithering
+        let r = data[i] >> 5;
+        let g = data[i+1] >> 5;
+        let b = data[i+2] >> 5;
+        let combined = (r << 6) | (g << 3) | b;
         
-        let lum = 0.299 * r + 0.587 * g + 0.114 * b;
-        let bw = if lum > 128.0 { 1u8 } else { 0u8 };
-        
-        h ^= bw as u64;
+        h ^= combined as u64;
         h = h.wrapping_mul(0x100000001b3);
         
         i += step;

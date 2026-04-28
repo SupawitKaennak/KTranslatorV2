@@ -14,7 +14,7 @@ pub struct OllamaTranslator {
 impl OllamaTranslator {
     pub fn new(url: String, model: String) -> Result<Self> {
         let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(300)) // Local models can be very slow on CPU
+            .timeout(std::time::Duration::from_secs(60)) // Reduced from 300s to avoid long hangs while gaming
             .build()
             .context("build http client")?;
         Ok(Self {
@@ -63,16 +63,12 @@ impl Translator for OllamaTranslator {
 
         let system = if source_lines.len() > 1 {
             format!(
-                "Translate each line into {}. \
-                 Return EXACTLY {} lines. \
-                 CRITICAL: Do NOT repeat the same translation for different lines. \
-                 Do NOT add explanations or extra text. \
-                 Output ONLY the translations, one per line.",
+                "Translate to {}. NO EXPLANATIONS. Return exactly {} lines.",
                 target_name, source_lines.len()
             )
         } else {
             format!(
-                "Translate into {}. Output ONLY the translation, nothing else.",
+                "Translate to {}. ONLY the translation.",
                 target_name
             )
         };
