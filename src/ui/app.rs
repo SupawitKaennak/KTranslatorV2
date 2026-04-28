@@ -1563,7 +1563,29 @@ impl App {
                             ui.label("Groq (High speed, Free)");
                             ui.horizontal(|ui| {
                                 ui.label("model");
-                                ui.text_edit_singleline(&mut settings.groq_model);
+                                let groq_models = vec![
+                                    ("llama-3.3-70b-versatile", "Llama 3.3 70B (Versatile)"),
+                                    ("llama-3.1-8b-instant", "Llama 3.1 8B (Instant)"),
+                                    ("gemma2-9b-it", "Gemma 2 9B"),
+                                    ("qwen-qwq-32b", "Qwen QwQ 32B (Reasoning)"),
+                                    ("mistral-saba-24b", "Mistral Saba 24B"),
+                                    ("deepseek-r1-distill-llama-70b", "DeepSeek R1 70B"),
+                                ];
+                                let mut current = settings.groq_model.clone();
+                                egui::ComboBox::from_id_salt("groq_model_dropdown")
+                                    .width(280.0)
+                                    .selected_text(
+                                        groq_models.iter()
+                                            .find(|(id, _)| *id == current.as_str())
+                                            .map(|(_, name)| *name)
+                                            .unwrap_or_else(|| current.as_str()),
+                                    )
+                                    .show_ui(ui, |ui| {
+                                        for (id, name) in &groq_models {
+                                            ui.selectable_value(&mut current, id.to_string(), *name);
+                                        }
+                                    });
+                                settings.groq_model = current;
                             });
                             ui.horizontal(|ui| {
                                 ui.label("api_key");
@@ -1575,18 +1597,70 @@ impl App {
                             ui.hyperlink_to("Get Groq API Key", "https://console.groq.com/keys");
                         }
                         TranslationProvider::Ollama => {
-                            ui.label("Ollama (Local/Offline)");
+                            ui.label("Ollama (Local/Offline — Unlimited & Free)");
                             ui.horizontal(|ui| {
                                 ui.label("Server URL");
                                 ui.text_edit_singleline(&mut settings.ollama_url);
                             });
+                            ui.add_space(4.0);
+
+                            // ── Recommended models dropdown ──
+                            let ollama_models: Vec<(&str, &str, &str)> = vec![
+                                ("qwen2.5:7b",       "Qwen 2.5 7B",       "🌟 Best for Asian languages (8GB VRAM)"),
+                                ("qwen2.5:14b",      "Qwen 2.5 14B",      "🌟 Higher quality Asian translation (12GB VRAM)"),
+                                ("qwen2.5:32b",      "Qwen 2.5 32B",      "🏆 Premium quality (24GB VRAM)"),
+                                ("qwen2.5:72b",      "Qwen 2.5 72B",      "🏆 Near GPT-4 quality (48GB+ VRAM)"),
+                                ("qwen3:8b",         "Qwen 3 8B",         "🆕 Latest Qwen generation (8GB VRAM)"),
+                                ("qwen3:14b",        "Qwen 3 14B",        "🆕 Latest Qwen generation (12GB VRAM)"),
+                                ("qwen3:32b",        "Qwen 3 32B",        "🆕 Latest Qwen generation (24GB VRAM)"),
+                                ("gemma2:9b",        "Gemma 2 9B",        "Google's efficient model (8GB VRAM)"),
+                                ("gemma2:27b",       "Gemma 2 27B",       "Google's premium model (20GB VRAM)"),
+                                ("aya-expanse:8b",   "Aya Expanse 8B",    "🌐 Multilingual specialist (8GB VRAM)"),
+                                ("aya-expanse:32b",  "Aya Expanse 32B",   "🌐 Best multilingual quality (24GB VRAM)"),
+                                ("llama3.1:8b",      "Llama 3.1 8B",      "Meta's versatile model (8GB VRAM)"),
+                                ("llama3.3:70b",     "Llama 3.3 70B",     "Meta's flagship model (48GB+ VRAM)"),
+                            ];
+
                             ui.horizontal(|ui| {
-                                ui.label("Model Name");
-                                ui.text_edit_singleline(&mut settings.ollama_model);
+                                ui.label("Model");
+                                let mut current = settings.ollama_model.clone();
+                                egui::ComboBox::from_id_salt("ollama_model_dropdown")
+                                    .width(300.0)
+                                    .selected_text(
+                                        ollama_models.iter()
+                                            .find(|(id, _, _)| *id == current.as_str())
+                                            .map(|(_, name, _)| *name)
+                                            .unwrap_or_else(|| current.as_str()),
+                                    )
+                                    .show_ui(ui, |ui| {
+                                        for (id, name, desc) in &ollama_models {
+                                            let label = format!("{name}  —  {desc}");
+                                            ui.selectable_value(&mut current, id.to_string(), label);
+                                        }
+                                    });
+                                settings.ollama_model = current;
                             });
-                            ui.small(
-                                "Make sure Ollama is running and you have run 'ollama pull <model>'",
-                            );
+
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                ui.label("Custom");
+                                ui.text_edit_singleline(&mut settings.ollama_model)
+                                    .on_hover_text("Type any model name here if it's not in the dropdown");
+                            });
+
+                            ui.add_space(6.0);
+                            ui.separator();
+                            ui.add_space(4.0);
+
+                            // Pull command helper
+                            let pull_cmd = format!("ollama pull {}", settings.ollama_model);
+                            ui.horizontal(|ui| {
+                                ui.label("📋 Run this first:");
+                                if ui.button(&pull_cmd).on_hover_text("Click to copy").clicked() {
+                                    ui.ctx().copy_text(pull_cmd.clone());
+                                }
+                            });
+                            ui.small("Make sure Ollama is running before clicking Save & Apply.");
                         }
                     }
 
