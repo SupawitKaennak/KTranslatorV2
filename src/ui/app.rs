@@ -701,6 +701,9 @@ impl App {
                                 let has_positions = !ocr_lines.is_empty();
 
                                 if has_positions {
+                                    // Max width for text wrapping = region width
+                                    let max_text_w = full_rect.width() - 8.0;
+
                                     for (idx, ocr_line) in ocr_lines.iter().enumerate() {
                                         let trans = trans_lines
                                             .get(idx)
@@ -711,32 +714,34 @@ impl App {
                                         // Font size ~90% of OCR line height, clamped sensibly
                                         let font_size = (ocr_line.h * 0.90).clamp(11.0, 26.0);
 
+                                        // Wrap text within region width
+                                        let wrap_width = (max_text_w - ocr_line.x + full_rect.left()).max(100.0);
                                         let galley = ctx.fonts(|f| {
-                                            f.layout_no_wrap(
+                                            f.layout(
                                                 trans.to_string(),
                                                 egui::FontId::proportional(font_size),
                                                 egui::Color32::WHITE,
+                                                wrap_width,
                                             )
                                         });
 
-                                        // Align translated text to the left edge of the OCR line
-                                        let text_pos = egui::pos2(ocr_line.x, ocr_line.y);
-                                        let text_size = galley.size();
-
-                                        // Dark rounded background only behind this line
-                                        let pad = egui::vec2(5.0, 3.0);
+                                        // Background covers the ENTIRE OCR line area to fully hide original text
+                                        let bg_w = ocr_line.w.max(galley.size().x + 10.0).min(wrap_width + 10.0);
+                                        let bg_h = ocr_line.h.max(galley.size().y + 4.0);
                                         let bg = egui::Rect::from_min_size(
-                                            text_pos - pad,
-                                            text_size + pad * 2.0,
+                                            egui::pos2(ocr_line.x - 2.0, ocr_line.y - 1.0),
+                                            egui::vec2(bg_w + 4.0, bg_h + 2.0),
                                         );
+                                        // Fully opaque dark background — NOT pure black (color-keyed)
                                         painter.rect_filled(
                                             bg,
-                                            4.0,
-                                            // NOT from_black_alpha — pure RGB(0,0,0) gets
-                                            // color-keyed to transparent by Win32 LWA_COLORKEY.
-                                            // Use dark navy (non-zero RGB) instead.
-                                            egui::Color32::from_rgba_unmultiplied(18, 18, 30, 220),
+                                            3.0,
+                                            egui::Color32::from_rgba_unmultiplied(18, 18, 30, 255),
                                         );
+
+                                        // Center text vertically within the OCR line box
+                                        let text_y = ocr_line.y + (bg_h - galley.size().y) / 2.0;
+                                        let text_pos = egui::pos2(ocr_line.x, text_y);
                                         painter.galley(text_pos, galley, egui::Color32::WHITE);
                                     }
 
@@ -746,11 +751,13 @@ impl App {
                                         let mut y = last.y + last.h + 4.0;
                                         for extra in &trans_lines[ocr_lines.len()..] {
                                             if extra.trim().is_empty() { continue; }
+                                            let wrap_width = (full_rect.width() - last.x + full_rect.left() - 8.0).max(100.0);
                                             let galley = ctx.fonts(|f| {
-                                                f.layout_no_wrap(
+                                                f.layout(
                                                     extra.clone(),
                                                     egui::FontId::proportional(14.0),
                                                     egui::Color32::WHITE,
+                                                    wrap_width,
                                                 )
                                             });
                                             let pos = egui::pos2(last.x, y);
@@ -758,7 +765,7 @@ impl App {
                                                 pos - egui::vec2(5.0, 3.0),
                                                 galley.size() + egui::vec2(10.0, 6.0),
                                             );
-                                            painter.rect_filled(bg, 4.0, egui::Color32::from_rgba_unmultiplied(18, 18, 30, 220));
+                                            painter.rect_filled(bg, 3.0, egui::Color32::from_rgba_unmultiplied(18, 18, 30, 255));
                                             let line_h = galley.size().y;
                                             painter.galley(pos, galley, egui::Color32::WHITE);
                                             y += line_h + 4.0;
@@ -770,11 +777,13 @@ impl App {
                                     let mut y = full_rect.top() + 8.0;
                                     for line in fallback_text.lines() {
                                         if line.trim().is_empty() { continue; }
+                                        let wrap_width = full_rect.width() - 16.0;
                                         let galley = ctx.fonts(|f| {
-                                            f.layout_no_wrap(
+                                            f.layout(
                                                 line.to_string(),
                                                 egui::FontId::proportional(font_size),
                                                 egui::Color32::WHITE,
+                                                wrap_width,
                                             )
                                         });
                                         let x = (full_rect.center().x - galley.size().x / 2.0)
@@ -784,7 +793,7 @@ impl App {
                                             pos - egui::vec2(5.0, 3.0),
                                             galley.size() + egui::vec2(10.0, 6.0),
                                         );
-                                        painter.rect_filled(bg, 4.0, egui::Color32::from_rgba_unmultiplied(18, 18, 30, 220));
+                                        painter.rect_filled(bg, 3.0, egui::Color32::from_rgba_unmultiplied(18, 18, 30, 255));
                                         let line_h = galley.size().y;
                                         painter.galley(pos, galley, egui::Color32::WHITE);
                                         y += line_h + 4.0;
@@ -911,64 +920,64 @@ impl App {
     /// If the response has no numbers at all (single-line or model ignored
     /// the instruction), fall back to plain line-split.
     fn parse_numbered_lines(raw: &str, ocr_count: usize) -> Vec<String> {
-        // Detect whether the response uses the numbered format.
-        let has_numbers = raw.lines().any(|l| {
-            let t = l.trim();
-            t.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
-        });
-
-        if !has_numbers || ocr_count == 0 {
-            // Plain split fallback - but ensure we don't return more lines than requested
-            let lines: Vec<String> = raw.lines().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
-            if lines.len() == ocr_count {
-                return lines;
-            }
-            // If line count doesn't match, try to use the numbers anyway or fallback to empty
-            let mut res = vec!["ไม่มีข้อความที่ต้องแปล".to_string(); ocr_count];
-            for (idx, line) in lines.iter().enumerate().take(ocr_count) {
-                res[idx] = line.clone();
-            }
-            return res;
-        }
-
-        let mut result = vec!["ไม่มีข้อความที่ต้องแปล".to_string(); ocr_count];
-        for line in raw.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-
-            // Find the first sequence of digits at the start of the line
-            let mut num_str = String::new();
-            for c in trimmed.chars() {
-                if c.is_ascii_digit() {
-                    num_str.push(c);
-                } else {
-                    break;
+        /// Strip leading prefixes that AI models commonly add:
+        /// "1. ", "1) ", "1: ", "- ", "* ", "• ", "n. ", etc.
+        fn strip_prefix(s: &str) -> &str {
+            let t = s.trim();
+            if t.is_empty() { return t; }
+            // Try stripping leading digits + punctuation (e.g. "1. ", "12) ", "3: ")
+            let after_digits = t.trim_start_matches(|c: char| c.is_ascii_digit());
+            if after_digits.len() < t.len() {
+                // We stripped some digits — now skip punctuation and whitespace
+                let after_punct = after_digits.trim_start_matches(|c: char| {
+                    c == '.' || c == ')' || c == ':' || c == '-' || c == '>' || c.is_whitespace()
+                });
+                if !after_punct.is_empty() {
+                    return after_punct;
                 }
             }
-
-            if !num_str.is_empty() {
-                if let Ok(idx) = num_str.parse::<usize>() {
-                    if idx >= 1 && idx <= ocr_count {
-                        // Find where the actual text starts (skip the number and any punctuation like . : ) )
-                        let mut start_idx = num_str.len();
-                        let remaining = &trimmed[start_idx..];
-                        for c in remaining.chars() {
-                            if c == '.' || c == ')' || c == ':' || c.is_whitespace() {
-                                start_idx += c.len_utf8();
-                            } else {
-                                break;
-                            }
-                        }
-                        let content = trimmed[start_idx..].trim().to_string();
-                        if !content.is_empty() {
-                            result[idx - 1] = content;
-                        }
-                    }
+            // Try stripping common bullet prefixes
+            for prefix in &["- ", "* ", "• ", "· ", "> "] {
+                if let Some(rest) = t.strip_prefix(prefix) {
+                    return rest.trim();
                 }
             }
+            t
         }
+
+        if ocr_count == 0 {
+            return vec![];
+        }
+
+        // Preserve ALL lines (including empty ones) to maintain index alignment
+        // with OCR line positions. DO NOT filter empty lines!
+        let all_lines: Vec<String> = raw
+            .lines()
+            .map(|l| strip_prefix(l).to_string())
+            .collect();
+
+        // If line count matches exactly, return as-is (perfect alignment)
+        if all_lines.len() == ocr_count {
+            return all_lines;
+        }
+
+        // If AI returned more lines than OCR (e.g. added explanations),
+        // try removing truly empty lines to see if it matches
+        if all_lines.len() > ocr_count {
+            let non_empty: Vec<String> = all_lines.iter()
+                .filter(|s| !s.is_empty())
+                .cloned()
+                .collect();
+            if non_empty.len() == ocr_count {
+                return non_empty;
+            }
+            // Still doesn't match — truncate to ocr_count
+            return all_lines.into_iter().take(ocr_count).collect();
+        }
+
+        // AI returned fewer lines — pad with empty strings
+        let mut result = all_lines;
+        result.resize(ocr_count, String::new());
         result
     }
 
@@ -1402,6 +1411,10 @@ impl App {
 
                     // 5. Hit Translation API for TEXT-ONLY translation.
                     if let Some(t) = &translator {
+                        let _ = tx.send(BgResult::StatusUpdate { 
+                            slot_idx: i, 
+                            status: "Translating (waiting for AI)...".to_string() 
+                        });
                         let translated =
                             t.translate(&ocr_text, source_lang.as_ref(), &target_lang)?;
 
@@ -1606,19 +1619,30 @@ impl App {
 
                             // ── Recommended models dropdown ──
                             let ollama_models: Vec<(&str, &str, &str)> = vec![
-                                ("qwen2.5:7b",       "Qwen 2.5 7B",       "🌟 Best for Asian languages (8GB VRAM)"),
-                                ("qwen2.5:14b",      "Qwen 2.5 14B",      "🌟 Higher quality Asian translation (12GB VRAM)"),
-                                ("qwen2.5:32b",      "Qwen 2.5 32B",      "🏆 Premium quality (24GB VRAM)"),
-                                ("qwen2.5:72b",      "Qwen 2.5 72B",      "🏆 Near GPT-4 quality (48GB+ VRAM)"),
-                                ("qwen3:8b",         "Qwen 3 8B",         "🆕 Latest Qwen generation (8GB VRAM)"),
-                                ("qwen3:14b",        "Qwen 3 14B",        "🆕 Latest Qwen generation (12GB VRAM)"),
-                                ("qwen3:32b",        "Qwen 3 32B",        "🆕 Latest Qwen generation (24GB VRAM)"),
-                                ("gemma2:9b",        "Gemma 2 9B",        "Google's efficient model (8GB VRAM)"),
-                                ("gemma2:27b",       "Gemma 2 27B",       "Google's premium model (20GB VRAM)"),
-                                ("aya-expanse:8b",   "Aya Expanse 8B",    "🌐 Multilingual specialist (8GB VRAM)"),
-                                ("aya-expanse:32b",  "Aya Expanse 32B",   "🌐 Best multilingual quality (24GB VRAM)"),
-                                ("llama3.1:8b",      "Llama 3.1 8B",      "Meta's versatile model (8GB VRAM)"),
-                                ("llama3.3:70b",     "Llama 3.3 70B",     "Meta's flagship model (48GB+ VRAM)"),
+                                // ── Lightweight (CPU / Low VRAM) ──
+                                ("qwen2.5:0.5b",     "Qwen 2.5 0.5B",     "⚡ Ultra-light, CPU OK (~1GB)"),
+                                ("qwen2.5:1.5b",     "Qwen 2.5 1.5B",     "⚡ Very light, CPU OK (~2GB)"),
+                                ("qwen2.5:3b",       "Qwen 2.5 3B",       "⚡ Light & capable (~3GB)"),
+                                ("llama3.2:1b",      "Llama 3.2 1B",      "⚡ Meta ultra-light (~2GB)"),
+                                ("llama3.2:3b",      "Llama 3.2 3B",      "⚡ Meta light (~3GB)"),
+                                ("gemma2:2b",        "Gemma 2 2B",        "⚡ Google ultra-light (~2GB)"),
+                                ("phi3:mini",        "Phi-3 Mini 3.8B",   "⚡ Microsoft light (~3GB)"),
+                                // ── Medium (8GB VRAM) ──
+                                ("qwen2.5:7b",       "Qwen 2.5 7B",       "🌟 Best for Asian languages (8GB)"),
+                                ("qwen3:8b",         "Qwen 3 8B",         "🆕 Latest Qwen (8GB)"),
+                                ("gemma2:9b",        "Gemma 2 9B",        "Google efficient (8GB)"),
+                                ("aya-expanse:8b",   "Aya Expanse 8B",    "🌐 Multilingual specialist (8GB)"),
+                                ("llama3.1:8b",      "Llama 3.1 8B",      "Meta versatile (8GB)"),
+                                // ── Large (12-24GB VRAM) ──
+                                ("qwen2.5:14b",      "Qwen 2.5 14B",      "🌟 High quality Asian (12GB)"),
+                                ("qwen3:14b",        "Qwen 3 14B",        "🆕 Latest Qwen (12GB)"),
+                                ("gemma2:27b",       "Gemma 2 27B",       "Google premium (20GB)"),
+                                ("qwen2.5:32b",      "Qwen 2.5 32B",      "🏆 Premium quality (24GB)"),
+                                ("qwen3:32b",        "Qwen 3 32B",        "🆕 Latest Qwen (24GB)"),
+                                ("aya-expanse:32b",  "Aya Expanse 32B",   "🌐 Best multilingual (24GB)"),
+                                // ── XL (48GB+ VRAM) ──
+                                ("qwen2.5:72b",      "Qwen 2.5 72B",      "🏆 Near GPT-4 (48GB+)"),
+                                ("llama3.3:70b",     "Llama 3.3 70B",     "Meta flagship (48GB+)"),
                             ];
 
                             ui.horizontal(|ui| {

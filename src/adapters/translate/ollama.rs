@@ -14,7 +14,7 @@ pub struct OllamaTranslator {
 impl OllamaTranslator {
     pub fn new(url: String, model: String) -> Result<Self> {
         let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(60)) // Local models can be slow
+            .timeout(std::time::Duration::from_secs(300)) // Local models can be very slow on CPU
             .build()
             .context("build http client")?;
         Ok(Self {
@@ -33,17 +33,6 @@ impl Translator for OllamaTranslator {
         target: &LanguageTag,
     ) -> Result<String> {
         let source_lines: Vec<&str> = text.lines().collect();
-        let (prompt_body, multi_line) = if source_lines.len() > 1 {
-            let numbered = source_lines
-                .iter()
-                .enumerate()
-                .map(|(i, l)| format!("{}. {}", i + 1, l))
-                .collect::<Vec<_>>()
-                .join("\n");
-            (numbered, true)
-        } else {
-            (text.to_string(), false)
-        };
 
         // Convert language codes to full names for better AI understanding
         let target_name = match target.0.as_str() {
@@ -62,37 +51,46 @@ impl Translator for OllamaTranslator {
             _ => &target.0,
         };
 
-        let system_prompt = if multi_line {
+        let src_name = source.map(|s| match s.0.as_str() {
+            "th" => "Thai",
+            "en" => "English",
+            "ja" => "Japanese",
+            "zh-Hans" => "Chinese Simplified",
+            "zh-Hant" => "Chinese Traditional",
+            "ko" => "Korean",
+            _ => &s.0,
+        });
+
+        let system = if source_lines.len() > 1 {
             format!(
-                "You are a professional translator. CRITICAL: Translate each numbered line into {}. \
-                 You MUST return EXACTLY the same number of lines as provided. \
-                 Keep the same numbering (N. <translation>). Do NOT skip or merge lines. \
-                 Output ONLY the translated numbered list, no extra text.",
-                target_name
+                "Translate each line into {}. \
+                 Return EXACTLY {} lines of translation. \
+                 Each input line must have exactly one output line. \
+                 Do NOT add numbers, bullets, or explanations. \
+                 Do NOT merge or skip lines. \
+                 Keep blank lines as blank lines. \
+                 Output ONLY the translated lines, one per line.",
+                target_name, source_lines.len()
             )
         } else {
             format!(
-                "You are a professional translator. Translate this text into {}. \
-                 Output ONLY the translated text, no explanations.",
+                "Translate into {}. Output ONLY the translation, nothing else.",
                 target_name
             )
         };
 
-        let user_prompt = if let Some(src) = source {
-            let src_name = match src.0.as_str() {
-                "th" => "Thai",
-                "en" => "English",
-                "ja" => "Japanese",
-                "zh-Hans" => "Chinese Simplified",
-                "zh-Hant" => "Chinese Traditional",
-                "ko" => "Korean",
-                _ => &src.0,
-            };
-            format!("Translate from {} to {}:\n\n{}", src_name, target_name, prompt_body)
+        let user = if let Some(sn) = src_name {
+            format!("Translate from {} to {}:\n\n{}", sn, target_name, text)
         } else {
-            format!("Translate to {}:\n\n{}", target_name, prompt_body)
+            format!("Translate to {}:\n\n{}", target_name, text)
         };
 
+        self.call_ollama(&system, &user)
+    }
+}
+
+impl OllamaTranslator {
+    fn call_ollama(&self, system_prompt: &str, user_prompt: &str) -> Result<String> {
         let req = OllamaChatRequest {
             model: self.model.clone(),
             messages: vec![
@@ -108,7 +106,7 @@ impl Translator for OllamaTranslator {
             stream: false,
             options: Some(OllamaOptions {
                 temperature: 0.2,
-                num_predict: 4096,
+                num_predict: -1, // unlimited — let the model finish naturally
             }),
         };
 
@@ -148,7 +146,7 @@ struct OllamaMessage {
 #[derive(Serialize)]
 struct OllamaOptions {
     temperature: f32,
-    num_predict: u32,
+    num_predict: i32,
 }
 
 #[derive(Deserialize)]
