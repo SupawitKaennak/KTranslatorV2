@@ -1606,19 +1606,30 @@ impl App {
 
                             // ── Recommended models dropdown ──
                             let ollama_models: Vec<(&str, &str, &str)> = vec![
-                                ("qwen2.5:7b",       "Qwen 2.5 7B",       "🌟 Best for Asian languages (8GB VRAM)"),
-                                ("qwen2.5:14b",      "Qwen 2.5 14B",      "🌟 Higher quality Asian translation (12GB VRAM)"),
-                                ("qwen2.5:32b",      "Qwen 2.5 32B",      "🏆 Premium quality (24GB VRAM)"),
-                                ("qwen2.5:72b",      "Qwen 2.5 72B",      "🏆 Near GPT-4 quality (48GB+ VRAM)"),
-                                ("qwen3:8b",         "Qwen 3 8B",         "🆕 Latest Qwen generation (8GB VRAM)"),
-                                ("qwen3:14b",        "Qwen 3 14B",        "🆕 Latest Qwen generation (12GB VRAM)"),
-                                ("qwen3:32b",        "Qwen 3 32B",        "🆕 Latest Qwen generation (24GB VRAM)"),
-                                ("gemma2:9b",        "Gemma 2 9B",        "Google's efficient model (8GB VRAM)"),
-                                ("gemma2:27b",       "Gemma 2 27B",       "Google's premium model (20GB VRAM)"),
-                                ("aya-expanse:8b",   "Aya Expanse 8B",    "🌐 Multilingual specialist (8GB VRAM)"),
-                                ("aya-expanse:32b",  "Aya Expanse 32B",   "🌐 Best multilingual quality (24GB VRAM)"),
-                                ("llama3.1:8b",      "Llama 3.1 8B",      "Meta's versatile model (8GB VRAM)"),
-                                ("llama3.3:70b",     "Llama 3.3 70B",     "Meta's flagship model (48GB+ VRAM)"),
+                                // ── Lightweight (CPU / Low VRAM) ──
+                                ("qwen2.5:0.5b",     "Qwen 2.5 0.5B",     "⚡ Ultra-light, CPU OK (~1GB)"),
+                                ("qwen2.5:1.5b",     "Qwen 2.5 1.5B",     "⚡ Very light, CPU OK (~2GB)"),
+                                ("qwen2.5:3b",       "Qwen 2.5 3B",       "⚡ Light & capable (~3GB)"),
+                                ("llama3.2:1b",      "Llama 3.2 1B",      "⚡ Meta ultra-light (~2GB)"),
+                                ("llama3.2:3b",      "Llama 3.2 3B",      "⚡ Meta light (~3GB)"),
+                                ("gemma2:2b",        "Gemma 2 2B",        "⚡ Google ultra-light (~2GB)"),
+                                ("phi3:mini",        "Phi-3 Mini 3.8B",   "⚡ Microsoft light (~3GB)"),
+                                // ── Medium (8GB VRAM) ──
+                                ("qwen2.5:7b",       "Qwen 2.5 7B",       "🌟 Best for Asian languages (8GB)"),
+                                ("qwen3:8b",         "Qwen 3 8B",         "🆕 Latest Qwen (8GB)"),
+                                ("gemma2:9b",        "Gemma 2 9B",        "Google efficient (8GB)"),
+                                ("aya-expanse:8b",   "Aya Expanse 8B",    "🌐 Multilingual specialist (8GB)"),
+                                ("llama3.1:8b",      "Llama 3.1 8B",      "Meta versatile (8GB)"),
+                                // ── Large (12-24GB VRAM) ──
+                                ("qwen2.5:14b",      "Qwen 2.5 14B",      "🌟 High quality Asian (12GB)"),
+                                ("qwen3:14b",        "Qwen 3 14B",        "🆕 Latest Qwen (12GB)"),
+                                ("gemma2:27b",       "Gemma 2 27B",       "Google premium (20GB)"),
+                                ("qwen2.5:32b",      "Qwen 2.5 32B",      "🏆 Premium quality (24GB)"),
+                                ("qwen3:32b",        "Qwen 3 32B",        "🆕 Latest Qwen (24GB)"),
+                                ("aya-expanse:32b",  "Aya Expanse 32B",   "🌐 Best multilingual (24GB)"),
+                                // ── XL (48GB+ VRAM) ──
+                                ("qwen2.5:72b",      "Qwen 2.5 72B",      "🏆 Near GPT-4 (48GB+)"),
+                                ("llama3.3:70b",     "Llama 3.3 70B",     "Meta flagship (48GB+)"),
                             ];
 
                             ui.horizontal(|ui| {
