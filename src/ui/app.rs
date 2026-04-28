@@ -719,24 +719,23 @@ impl App {
                                             )
                                         });
 
-                                        // Align translated text to the left edge of the OCR line
-                                        let text_pos = egui::pos2(ocr_line.x, ocr_line.y);
-                                        let text_size = galley.size();
-
-                                        // Dark rounded background only behind this line
-                                        let pad = egui::vec2(5.0, 3.0);
+                                        // Background covers the ENTIRE OCR line area to fully hide original text
+                                        let bg_w = ocr_line.w.max(galley.size().x + 10.0);
+                                        let bg_h = ocr_line.h.max(galley.size().y + 4.0);
                                         let bg = egui::Rect::from_min_size(
-                                            text_pos - pad,
-                                            text_size + pad * 2.0,
+                                            egui::pos2(ocr_line.x - 2.0, ocr_line.y - 1.0),
+                                            egui::vec2(bg_w + 4.0, bg_h + 2.0),
                                         );
+                                        // Fully opaque dark background — NOT pure black (color-keyed)
                                         painter.rect_filled(
                                             bg,
-                                            4.0,
-                                            // NOT from_black_alpha — pure RGB(0,0,0) gets
-                                            // color-keyed to transparent by Win32 LWA_COLORKEY.
-                                            // Use dark navy (non-zero RGB) instead.
-                                            egui::Color32::from_rgba_unmultiplied(18, 18, 30, 220),
+                                            3.0,
+                                            egui::Color32::from_rgba_unmultiplied(18, 18, 30, 255),
                                         );
+
+                                        // Center text vertically within the OCR line box
+                                        let text_y = ocr_line.y + (bg_h - galley.size().y) / 2.0;
+                                        let text_pos = egui::pos2(ocr_line.x, text_y);
                                         painter.galley(text_pos, galley, egui::Color32::WHITE);
                                     }
 
@@ -758,7 +757,7 @@ impl App {
                                                 pos - egui::vec2(5.0, 3.0),
                                                 galley.size() + egui::vec2(10.0, 6.0),
                                             );
-                                            painter.rect_filled(bg, 4.0, egui::Color32::from_rgba_unmultiplied(18, 18, 30, 220));
+                                            painter.rect_filled(bg, 3.0, egui::Color32::from_rgba_unmultiplied(18, 18, 30, 255));
                                             let line_h = galley.size().y;
                                             painter.galley(pos, galley, egui::Color32::WHITE);
                                             y += line_h + 4.0;
@@ -784,7 +783,7 @@ impl App {
                                             pos - egui::vec2(5.0, 3.0),
                                             galley.size() + egui::vec2(10.0, 6.0),
                                         );
-                                        painter.rect_filled(bg, 4.0, egui::Color32::from_rgba_unmultiplied(18, 18, 30, 220));
+                                        painter.rect_filled(bg, 3.0, egui::Color32::from_rgba_unmultiplied(18, 18, 30, 255));
                                         let line_h = galley.size().y;
                                         painter.galley(pos, galley, egui::Color32::WHITE);
                                         y += line_h + 4.0;
