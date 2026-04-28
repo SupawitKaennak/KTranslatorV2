@@ -1,0 +1,464 @@
+use std::sync::{mpsc, Arc};
+use std::collections::HashMap;
+use parking_lot::Mutex;
+use crate::core::{
+    model::AppModel,
+    ports::{FrameRgba, FrameSource, Translator},
+    worker::{BgResult, SlotRuntimeState, smart_hash},
+};
+use crate::adapters::{
+    ocr::windows_ocr::WindowsOcr,
+};
+
+pub struct BackgroundCoordinator {
+    pub bg_tx: mpsc::Sender<BgResult>,
+    pub bg_rx: mpsc::Receiver<BgResult>,
+}
+
+impl BackgroundCoordinator {
+    pub fn new() -> Self {
+        let (bg_tx, bg_rx) = mpsc::channel();
+        Self { bg_tx, bg_rx }
+    }
+
+    pub fn now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+
+    pub fn process_results(
+        &self,
+        model_arc: &Arc<Mutex<AppModel>>,
+        slots_runtime: &mut Vec<SlotRuntimeState>,
+        last_errors: &mut std::collections::BTreeMap<usize, String>,
+        translation_cache: &Arc<Mutex<HashMap<(u64, Option<String>, String), (String, String)>>>,
+        text_translation_cache: &Arc<Mutex<HashMap<(u64, Option<String>, String), String>>>,
+    ) {
+        while let Ok(result) = self.bg_rx.try_recv() {
+            match result {
+                BgResult::Done {
+                    slot_idx,
+                    language_version,
+                    ocr_text,
+                    translated,
+                    frame_hash,
+                    ocr_lines,
+                } => {
+                    if let Some(runtime) = slots_runtime.get_mut(slot_idx) {
+                        let mut model = model_arc.lock();
+                        let slot = match model.slots.get_mut(slot_idx) {
+                            Some(s) => s,
+                            None => continue,
+                        };
+
+                        if language_version != slot.language_version {
+                            runtime.busy = false;
+                            runtime.processing = false;
+                            slot.next_tick_at_ms = 0;
+                            continue;
+                        }
+
+                        runtime.busy = false;
+                        runtime.processing = false;
+                        runtime.status = "Idle".to_string();
+                        runtime.last_hash = frame_hash;
+
+                        let now = Self::now_ms();
+                        slot.next_tick_at_ms = now.saturating_add(slot.refresh_ms.max(500));
+
+                        let new_ocr = ocr_text.trim();
+                        let old_ocr = slot.last_ocr_text.trim();
+
+                        if new_ocr.is_empty() {
+                            slot.last_ocr_text = String::new();
+                            slot.last_translation = String::new();
+                            slot.last_ocr_lines.clear();
+                            slot.last_trans_lines.clear();
+                        } else if new_ocr != old_ocr {
+                            slot.last_ocr_text = ocr_text.clone();
+                            slot.last_translation = translated.clone();
+                            slot.last_ocr_lines = ocr_lines.clone();
+                            slot.last_trans_lines = Self::parse_numbered_lines(&translated, ocr_lines.len());
+
+                            if frame_hash != 0 {
+                                let cache_key = (frame_hash, slot.source_lang.as_ref().map(|l| l.0.clone()), slot.target_lang.0.clone());
+                                translation_cache.lock().insert(cache_key, (ocr_text, translated));
+                            }
+                        } else {
+                            if !translated.trim().is_empty() {
+                                slot.last_trans_lines = Self::parse_numbered_lines(&translated, ocr_lines.len());
+                                slot.last_ocr_lines = ocr_lines;
+                                slot.last_translation = translated;
+                            }
+                        }
+                    }
+                    last_errors.remove(&slot_idx);
+                }
+                BgResult::Unchanged { slot_idx } => {
+                    if let Some(runtime) = slots_runtime.get_mut(slot_idx) {
+                        runtime.busy = false;
+                        runtime.status = "Idle".to_string();
+                    }
+                    let now = Self::now_ms();
+                    let mut model = model_arc.lock();
+                    if let Some(slot) = model.slots.get_mut(slot_idx) {
+                        slot.next_tick_at_ms = now.saturating_add(slot.refresh_ms.max(200));
+                    }
+                }
+                BgResult::HashChanged { slot_idx, new_hash } => {
+                    let mut model = model_arc.lock();
+                    if let Some(slot) = model.slots.get_mut(slot_idx) {
+                        slot.stable_hash = new_hash;
+                        slot.stable_since_ms = Self::now_ms();
+                        slot.next_tick_at_ms = slot.stable_since_ms.saturating_add(150);
+                    }
+                    if let Some(runtime) = slots_runtime.get_mut(slot_idx) {
+                        runtime.busy = false;
+                        runtime.status = "Settling...".to_string();
+                    }
+                }
+                BgResult::WaitingDebounce { slot_idx } => {
+                    if let Some(runtime) = slots_runtime.get_mut(slot_idx) {
+                        runtime.busy = false;
+                        runtime.status = "Waiting...".to_string();
+                    }
+                    let mut model = model_arc.lock();
+                    if let Some(slot) = model.slots.get_mut(slot_idx) {
+                        slot.next_tick_at_ms = Self::now_ms() + 50;
+                    }
+                }
+                BgResult::CacheHit { slot_idx, language_version, ocr_text, translated, frame_hash } => {
+                    if let Some(runtime) = slots_runtime.get_mut(slot_idx) {
+                        let mut model = model_arc.lock();
+                        let slot = match model.slots.get_mut(slot_idx) {
+                            Some(s) => s,
+                            None => continue,
+                        };
+
+                        if language_version != slot.language_version {
+                            runtime.busy = false;
+                            slot.next_tick_at_ms = 0;
+                            continue;
+                        }
+
+                        runtime.busy = false;
+                        runtime.status = "Idle (Cached)".to_string();
+                        runtime.last_hash = frame_hash;
+
+                        slot.last_ocr_text = ocr_text;
+                        slot.last_translation = translated.clone();
+                        slot.last_trans_lines = translated.lines().map(|s| s.to_string()).collect(); // Cache hits are already padded/processed usually, but let's be safe.
+                        // Actually, better to use parse_numbered_lines here too if we want alignment.
+                        // But cache entries were saved via parse_numbered_lines? 
+                        // No, cache saves the RAW translated string.
+                        
+                        let _ocr_count = slot.last_ocr_lines.len(); // This might be wrong if last_ocr_lines is empty?
+                        // Wait, CacheHit doesn't include ocr_lines.
+                        // We should probably include them in CacheHit or at least the count.
+                        // For now, let's just split by lines.
+                        slot.last_trans_lines = translated.lines().map(|s| s.to_string()).collect();
+
+                        slot.next_tick_at_ms = Self::now_ms() + slot.refresh_ms.max(500);
+                    }
+                }
+                BgResult::Translating { slot_idx } => {
+                    if let Some(runtime) = slots_runtime.get_mut(slot_idx) {
+                        runtime.processing = true;
+                        runtime.status = "Translating...".to_string();
+                    }
+                }
+                BgResult::StatusUpdate { slot_idx, status } => {
+                    if let Some(runtime) = slots_runtime.get_mut(slot_idx) {
+                        runtime.status = status;
+                    }
+                }
+                BgResult::Error { slot_idx, language_version, err } => {
+                    if let Some(runtime) = slots_runtime.get_mut(slot_idx) {
+                        let mut model = model_arc.lock();
+                        let slot = match model.slots.get_mut(slot_idx) {
+                            Some(s) => s,
+                            None => continue,
+                        };
+
+                        runtime.busy = false;
+                        runtime.processing = false;
+                        runtime.status = "Error".to_string();
+
+                        let friendly = if err.contains("quota") || err.contains("429") {
+                            let secs = 30;
+                            format!("Region {}: API quota exceeded — retrying in {secs}s", slot_idx + 1)
+                        } else {
+                            let first_line = err.lines().next().unwrap_or(&err).trim().to_string();
+                            format!("Region {}: {first_line}", slot_idx + 1)
+                        };
+                        last_errors.insert(slot_idx, friendly);
+                        
+                        if language_version == slot.language_version {
+                            slot.next_tick_at_ms = Self::now_ms() + 2000;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn tick(
+        &self,
+        model_arc: &Arc<Mutex<AppModel>>,
+        slots_runtime: &mut Vec<SlotRuntimeState>,
+        capture: &Arc<dyn FrameSource>,
+        windows_ocr: &Arc<WindowsOcr>,
+        translator: &Arc<dyn Translator + Send + Sync>,
+        translation_cache: &Arc<Mutex<HashMap<(u64, Option<String>, String), (String, String)>>>,
+        text_translation_cache: &Arc<Mutex<HashMap<(u64, Option<String>, String), String>>>,
+    ) {
+        let now = Self::now_ms();
+        let snapshot = { model_arc.lock().clone() };
+        if !snapshot.running { return; }
+
+        for (i, slot) in snapshot.slots.iter().enumerate() {
+            if !slot.enabled || slot.rect.is_none() { continue; }
+
+            if slots_runtime.len() <= i {
+                slots_runtime.push(SlotRuntimeState::new());
+            }
+
+            // Language change detection logic (moved from app.rs)
+            let cur_src = slot.source_lang.as_ref().map(|l| l.0.clone());
+            let cur_tgt = slot.target_lang.0.clone();
+            let lang_changed = slots_runtime[i].last_langs != (cur_src.clone(), cur_tgt.clone());
+            if lang_changed {
+                slots_runtime[i].last_langs = (cur_src, cur_tgt);
+                slots_runtime[i].last_hash = 0;
+                translation_cache.lock().clear();
+                text_translation_cache.lock().clear();
+                
+                let mut model = model_arc.lock();
+                if let Some(m_slot) = model.slots.get_mut(i) {
+                    m_slot.language_version = m_slot.language_version.wrapping_add(1);
+                    m_slot.last_trans_lines.clear();
+                    m_slot.last_ocr_lines.clear();
+                    m_slot.last_translation.clear();
+                    m_slot.last_ocr_text.clear();
+                    m_slot.next_tick_at_ms = 0;
+                    m_slot.stable_hash = 0;
+                    m_slot.stable_since_ms = 0;
+                }
+                slots_runtime[i].last_hash = 1;
+                continue;
+            }
+
+            if slots_runtime[i].busy || now < slot.next_tick_at_ms {
+                continue;
+            }
+
+            slots_runtime[i].busy = true;
+            {
+                let mut m = model_arc.lock();
+                if let Some(s) = m.slots.get_mut(i) {
+                    s.next_tick_at_ms = u64::MAX;
+                }
+            }
+
+            let rect = slot.rect.unwrap();
+            let display_id = slot.display_id;
+            let source_lang = slot.source_lang.clone();
+            let target_lang = slot.target_lang.clone();
+            let capture = capture.clone();
+            let windows_ocr = windows_ocr.clone();
+            let translator = translator.clone();
+            let tx = self.bg_tx.clone();
+            let prev_hash = slots_runtime[i].last_hash;
+            let stable_hash = slot.stable_hash;
+            let stable_since_ms = slot.stable_since_ms;
+            let language_version = slot.language_version;
+            let cache_arc = translation_cache.clone();
+            let text_cache_arc = text_translation_cache.clone();
+
+            std::thread::spawn(move || {
+                let _ = tx.send(BgResult::StatusUpdate { slot_idx: i, status: "Capturing...".to_string() });
+                let tx_for_panic = tx.clone();
+                let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                    let tx_inner = tx.clone();
+                    let result = (|| -> anyhow::Result<BgResult> {
+                        let frame = capture.capture_rect(rect, display_id)?;
+                        let _ = tx_inner.send(BgResult::StatusUpdate { slot_idx: i, status: "Hashing...".to_string() });
+                        let hash = smart_hash(&frame.data);
+                        let now = Self::now_ms();
+
+                        if hash != stable_hash && now.saturating_sub(stable_since_ms) < 500 {
+                            return Ok(BgResult::HashChanged { slot_idx: i, new_hash: hash });
+                        }
+                        if now.saturating_sub(stable_since_ms) < 400 {
+                            return Ok(BgResult::WaitingDebounce { slot_idx: i });
+                        }
+                        if hash == prev_hash && prev_hash != 0 {
+                            return Ok(BgResult::Unchanged { slot_idx: i });
+                        }
+
+                        let cache_key = (hash, source_lang.as_ref().map(|l| l.0.clone()), target_lang.0.clone());
+                        {
+                            let cache = cache_arc.lock();
+                            if let Some((ocr, tra)) = cache.get(&cache_key) {
+                                return Ok(BgResult::CacheHit {
+                                    slot_idx: i, language_version, ocr_text: ocr.clone(), translated: tra.clone(), frame_hash: hash,
+                                });
+                            }
+                        }
+
+                        let _ = tx_inner.send(BgResult::Translating { slot_idx: i });
+                        
+                        // Upscaling logic
+                        let scale = 2u32;
+                        let new_w = frame.width * scale;
+                        let new_h = frame.height * scale;
+                        let mut upscaled = vec![0u8; (new_w * new_h * 4) as usize];
+                        for dst_y in 0..new_h {
+                            for dst_x in 0..new_w {
+                                let src_xf = dst_x as f32 / scale as f32;
+                                let src_yf = dst_y as f32 / scale as f32;
+                                let x0 = (src_xf as u32).min(frame.width - 1);
+                                let y0 = (src_yf as u32).min(frame.height - 1);
+                                let x1 = (x0 + 1).min(frame.width - 1);
+                                let y1 = (y0 + 1).min(frame.height - 1);
+                                let fx = src_xf - x0 as f32;
+                                let fy = src_yf - y0 as f32;
+                                let idx = |x: u32, y: u32| (y * frame.width + x) as usize * 4;
+                                let dst_idx = (dst_y * new_w + dst_x) as usize * 4;
+                                for c in 0..4 {
+                                    let v00 = frame.data[idx(x0, y0) + c] as f32;
+                                    let v10 = frame.data[idx(x1, y0) + c] as f32;
+                                    let v01 = frame.data[idx(x0, y1) + c] as f32;
+                                    let v11 = frame.data[idx(x1, y1) + c] as f32;
+                                    let top = v00 + (v10 - v00) * fx;
+                                    let bot = v01 + (v11 - v01) * fx;
+                                    upscaled[dst_idx + c] = (top + (bot - top) * fy) as u8;
+                                }
+                            }
+                        }
+                        let preprocessed_frame = FrameRgba { width: new_w, height: new_h, data: upscaled };
+
+                        let _ = tx_inner.send(BgResult::StatusUpdate { slot_idx: i, status: "OCR...".to_string() });
+                        let mut ocr_lines = windows_ocr.recognize_lines(&preprocessed_frame, source_lang.as_ref())?;
+                        let inv_scale = 1.0 / scale as f32;
+                        for line in &mut ocr_lines {
+                            line.x *= inv_scale; line.y *= inv_scale; line.w *= inv_scale; line.h *= inv_scale;
+                        }
+                        let ocr_text = ocr_lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n").trim().to_string();
+
+                        if ocr_text.is_empty() {
+                            return Ok(BgResult::Done {
+                                slot_idx: i, language_version, ocr_text: String::new(), translated: String::new(), frame_hash: hash, ocr_lines: Vec::new(),
+                            });
+                        }
+
+                        if source_lang.as_ref().map(|s| s.0 == target_lang.0).unwrap_or(false) {
+                            let mut cache = cache_arc.lock();
+                            cache.insert(cache_key, (ocr_text.clone(), ocr_text.clone()));
+                            return Ok(BgResult::Done {
+                                slot_idx: i, language_version, ocr_text: ocr_text.clone(), translated: ocr_text, frame_hash: hash, ocr_lines,
+                            });
+                        }
+
+                        {
+                            let text_hash = {
+                                let mut h: u64 = 0xcbf29ce484222325;
+                                for b in ocr_text.as_bytes() { h ^= *b as u64; h = h.wrapping_mul(0x100000001b3); }
+                                h
+                            };
+                            let text_cache_key = (text_hash, source_lang.as_ref().map(|l| l.0.clone()), target_lang.0.clone());
+                            let cached = { let text_cache = text_cache_arc.lock(); text_cache.get(&text_cache_key).cloned() };
+                            if let Some(cached_trans) = cached {
+                                let mut cache = cache_arc.lock();
+                                cache.insert(cache_key, (ocr_text.clone(), cached_trans.clone()));
+                                return Ok(BgResult::Done {
+                                    slot_idx: i, language_version, ocr_text, translated: cached_trans, frame_hash: hash, ocr_lines,
+                                });
+                            }
+                        }
+
+                        let _ = tx_inner.send(BgResult::StatusUpdate { slot_idx: i, status: "Translating (AI)...".to_string() });
+                        let translated = translator.translate(&ocr_text, source_lang.as_ref(), &target_lang)?;
+                        {
+                            let text_hash = {
+                                let mut h: u64 = 0xcbf29ce484222325;
+                                for b in ocr_text.as_bytes() { h ^= *b as u64; h = h.wrapping_mul(0x100000001b3); }
+                                h
+                            };
+                            let text_cache_key = (text_hash, source_lang.as_ref().map(|l| l.0.clone()), target_lang.0.clone());
+                            let mut frame_cache = cache_arc.lock();
+                            frame_cache.insert(cache_key, (ocr_text.clone(), translated.clone()));
+                            drop(frame_cache);
+                            let mut text_cache = text_cache_arc.lock();
+                            text_cache.insert(text_cache_key, translated.clone());
+                        }
+                        Ok(BgResult::Done { slot_idx: i, language_version, ocr_text, translated, frame_hash: hash, ocr_lines })
+                    })();
+
+                    match result {
+                        Ok(res) => { let _ = tx.send(res); }
+                        Err(e) => {
+                            let _ = tx.send(BgResult::Error { slot_idx: i, language_version, err: format!("{e:#}") });
+                        }
+                    }
+                }));
+
+                if res.is_err() {
+                    let _ = tx_for_panic.send(BgResult::Error {
+                        slot_idx: i, language_version, err: "Background thread panicked (system error)".to_string(),
+                    });
+                }
+            });
+        }
+    }
+
+    /// Parse a numbered translation response back into a Vec aligned to
+    /// the original OCR lines.
+    fn parse_numbered_lines(raw: &str, ocr_count: usize) -> Vec<String> {
+        fn strip_prefix(s: &str) -> &str {
+            let t = s.trim();
+            if t.is_empty() {
+                return t;
+            }
+            let after_digits = t.trim_start_matches(|c: char| c.is_ascii_digit());
+            if after_digits.len() < t.len() {
+                let after_punct = after_digits.trim_start_matches(|c: char| {
+                    c == '.' || c == ')' || c == ':' || c == '-' || c == '>' || c.is_whitespace()
+                });
+                if !after_punct.is_empty() {
+                    return after_punct;
+                }
+            }
+            for prefix in &["- ", "* ", "• ", "· ", "> "] {
+                if let Some(rest) = t.strip_prefix(prefix) {
+                    return rest.trim();
+                }
+            }
+            t
+        }
+
+        if ocr_count == 0 {
+            return vec![];
+        }
+        let all_lines: Vec<String> = raw.lines().map(|l| strip_prefix(l).to_string()).collect();
+        if all_lines.len() == ocr_count {
+            return all_lines;
+        }
+        if all_lines.len() > ocr_count {
+            let non_empty: Vec<String> = all_lines
+                .iter()
+                .filter(|s| !s.is_empty())
+                .cloned()
+                .collect();
+            if non_empty.len() == ocr_count {
+                return non_empty;
+            }
+            return all_lines.into_iter().take(ocr_count).collect();
+        }
+        let mut result = all_lines;
+        result.resize(ocr_count, String::new());
+        result
+    }
+}

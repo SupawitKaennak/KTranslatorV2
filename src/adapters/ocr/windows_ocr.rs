@@ -1,4 +1,6 @@
 use anyhow::{Context, Result};
+use std::collections::HashMap;
+use std::sync::Mutex;
 use windows::Graphics::Imaging::{BitmapPixelFormat, SoftwareBitmap};
 use windows::Media::Ocr::OcrEngine;
 use windows::Storage::Streams::DataWriter;
@@ -8,11 +10,17 @@ use crate::core::{
     types::LanguageTag,
 };
 
-pub struct WindowsOcr;
+pub struct WindowsOcr {
+    /// Cache of OcrEngine instances per language tag.
+    /// Creating an OcrEngine is expensive, so we reuse them.
+    engines: Mutex<HashMap<String, OcrEngine>>,
+}
 
 impl WindowsOcr {
     pub fn new() -> Self {
-        Self
+        Self {
+            engines: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Build the OcrEngine for the requested language.
@@ -56,7 +64,18 @@ impl WindowsOcr {
         frame: &FrameRgba,
         lang_hint: Option<&LanguageTag>,
     ) -> Result<Vec<OcrTextLine>> {
-        let engine = Self::make_engine(lang_hint)?;
+        let lang_key = lang_hint
+            .map(|l| l.0.clone())
+            .unwrap_or_else(|| "default".to_string());
+
+        let engine = {
+            let mut cache = self.engines.lock().unwrap();
+            if !cache.contains_key(&lang_key) {
+                cache.insert(lang_key.clone(), Self::make_engine(lang_hint)?);
+            }
+            cache.get(&lang_key).unwrap().clone()
+        };
+
         let bitmap = Self::to_software_bitmap(frame)?;
 
         let operation = engine.RecognizeAsync(&bitmap)?;

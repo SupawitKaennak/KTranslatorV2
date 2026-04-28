@@ -25,46 +25,34 @@ impl ScreenshotsCapture {
 
 impl FrameSource for ScreenshotsCapture {
     fn capture_rect(&self, rect: Rect, display_id: u32) -> Result<FrameRgba> {
-        // 1. Get the screen info and release the lock immediately
-        let screen = {
-            let now = Instant::now();
-            let mut cache_guard = self.cache.lock().unwrap();
-            
-            // Refresh cache if empty or older than 5 seconds (increased from 2s)
-            if cache_guard.is_none() || now.duration_since(cache_guard.as_ref().unwrap().0) > Duration::from_secs(5) {
-                if let Ok(fresh) = Screen::all() {
-                    *cache_guard = Some((now, fresh));
-                }
+        let now = Instant::now();
+        let mut cache_guard = self.cache.lock().unwrap();
+        
+        // Refresh cache if empty or older than 2 seconds
+        let screens = if let Some((last_refresh, cached_screens)) = &*cache_guard {
+            if now.duration_since(*last_refresh) > Duration::from_secs(2) {
+                let fresh = Screen::all().context("enumerate screens")?;
+                *cache_guard = Some((now, fresh));
+                &cache_guard.as_ref().unwrap().1
+            } else {
+                cached_screens
             }
-
-            let screens = &cache_guard.as_ref().ok_or_else(|| anyhow::anyhow!("failed to init screens"))?.1;
-            screens
-                .iter()
-                .find(|s| s.display_info.id == display_id)
-                .or_else(|| screens.iter().find(|s| s.display_info.is_primary))
-                .or_else(|| screens.first())
-                .cloned() // Clone the Screen object so we can release the lock
-                .ok_or_else(|| anyhow::anyhow!("no display found"))?
+        } else {
+            let fresh = Screen::all().context("enumerate screens")?;
+            *cache_guard = Some((now, fresh));
+            &cache_guard.as_ref().unwrap().1
         };
-        // Mutex lock is released here because `cache_guard` goes out of scope
 
-        // 2. Perform heavy capture WITHOUT holding the lock.
-        // CRITICAL: screen.capture() can BLOCK INDEFINITELY when a game is in
-        // exclusive fullscreen (DXGI Desktop Duplication waits for a new frame
-        // that never comes). We wrap it in a thread with a timeout to prevent
-        // the entire translation pipeline from hanging.
-        let full_img = {
-            let (cap_tx, cap_rx) = std::sync::mpsc::channel();
-            let screen_for_thread = screen.clone();
-            std::thread::spawn(move || {
-                let result = screen_for_thread.capture();
-                let _ = cap_tx.send(result);
-            });
-            cap_rx
-                .recv_timeout(Duration::from_secs(3))
-                .map_err(|_| anyhow::anyhow!("Screen capture timed out (3s) — game may be in exclusive fullscreen. Will retry."))?
-                .context("capture full screen")?
-        };
+        let screen = screens
+            .iter()
+            .find(|s| s.display_info.id == display_id)
+            .or_else(|| screens.iter().find(|s| s.display_info.is_primary))
+            .or_else(|| screens.first())
+            .ok_or_else(|| anyhow::anyhow!("no display found"))?;
+
+        // STRATEGY CHANGE: Capture the WHOLE screen instead of capture_area.
+        // Full screen capture is often more robust in games.
+        let full_img = screen.capture().context("capture full screen")?;
         
         // Rect.x and Rect.y are absolute desktop coordinates.
         // Convert to relative coordinates for the crop.
