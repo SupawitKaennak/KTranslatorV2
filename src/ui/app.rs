@@ -914,6 +914,7 @@ impl App {
         /// "1. ", "1) ", "1: ", "- ", "* ", "• ", "n. ", etc.
         fn strip_prefix(s: &str) -> &str {
             let t = s.trim();
+            if t.is_empty() { return t; }
             // Try stripping leading digits + punctuation (e.g. "1. ", "12) ", "3: ")
             let after_digits = t.trim_start_matches(|c: char| c.is_ascii_digit());
             if after_digits.len() < t.len() {
@@ -938,26 +939,35 @@ impl App {
             return vec![];
         }
 
-        // Collect non-empty lines and strip prefixes
-        let cleaned: Vec<String> = raw
+        // Preserve ALL lines (including empty ones) to maintain index alignment
+        // with OCR line positions. DO NOT filter empty lines!
+        let all_lines: Vec<String> = raw
             .lines()
             .map(|l| strip_prefix(l).to_string())
-            .filter(|s| !s.is_empty())
             .collect();
 
-        if cleaned.len() == ocr_count {
-            return cleaned;
+        // If line count matches exactly, return as-is (perfect alignment)
+        if all_lines.len() == ocr_count {
+            return all_lines;
         }
 
-        // Line count mismatch — pad or truncate
-        let mut result = Vec::with_capacity(ocr_count);
-        for i in 0..ocr_count {
-            if i < cleaned.len() {
-                result.push(cleaned[i].clone());
-            } else {
-                result.push(String::new());
+        // If AI returned more lines than OCR (e.g. added explanations),
+        // try removing truly empty lines to see if it matches
+        if all_lines.len() > ocr_count {
+            let non_empty: Vec<String> = all_lines.iter()
+                .filter(|s| !s.is_empty())
+                .cloned()
+                .collect();
+            if non_empty.len() == ocr_count {
+                return non_empty;
             }
+            // Still doesn't match — truncate to ocr_count
+            return all_lines.into_iter().take(ocr_count).collect();
         }
+
+        // AI returned fewer lines — pad with empty strings
+        let mut result = all_lines;
+        result.resize(ocr_count, String::new());
         result
     }
 
