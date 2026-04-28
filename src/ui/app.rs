@@ -703,6 +703,9 @@ impl App {
                                 if has_positions {
                                     // Max width for text wrapping = region width
                                     let max_text_w = full_rect.width() - 8.0;
+                                    
+                                    // Track the bottom position of the last rendered line to avoid overlaps
+                                    let mut last_bottom_y = full_rect.top();
 
                                     for (idx, ocr_line) in ocr_lines.iter().enumerate() {
                                         let trans = trans_lines
@@ -725,13 +728,24 @@ impl App {
                                             )
                                         });
 
+                                        // ── Collision Avoidance ──────────────────────────────────────
+                                        // Ensure this line starts AFTER the previous line's background
+                                        let mut start_y = ocr_line.y;
+                                        if start_y < last_bottom_y {
+                                            start_y = last_bottom_y + 1.0; // Small 1px gap
+                                        }
+
                                         // Background covers the ENTIRE OCR line area to fully hide original text
                                         let bg_w = ocr_line.w.max(galley.size().x + 10.0).min(wrap_width + 10.0);
                                         let bg_h = ocr_line.h.max(galley.size().y + 4.0);
                                         let bg = egui::Rect::from_min_size(
-                                            egui::pos2(ocr_line.x - 2.0, ocr_line.y - 1.0),
+                                            egui::pos2(ocr_line.x - 2.0, start_y - 1.0),
                                             egui::vec2(bg_w + 4.0, bg_h + 2.0),
                                         );
+                                        
+                                        // Update last_bottom_y for the next iteration
+                                        last_bottom_y = bg.max.y;
+
                                         // Fully opaque dark background — NOT pure black (color-keyed)
                                         painter.rect_filled(
                                             bg,
@@ -739,16 +753,16 @@ impl App {
                                             egui::Color32::from_rgba_unmultiplied(18, 18, 30, 255),
                                         );
 
-                                        // Center text vertically within the OCR line box
-                                        let text_y = ocr_line.y + (bg_h - galley.size().y) / 2.0;
+                                        // Center text vertically within the calculated background box
+                                        let text_y = start_y + (bg_h - galley.size().y) / 2.0;
                                         let text_pos = egui::pos2(ocr_line.x, text_y);
                                         painter.galley(text_pos, galley, egui::Color32::WHITE);
                                     }
 
-                                    // Render any extra translated lines below the last OCR line
+                                    // Render any extra translated lines below everything else
                                     if trans_lines.len() > ocr_lines.len() {
                                         let last = ocr_lines.last().unwrap();
-                                        let mut y = last.y + last.h + 4.0;
+                                        let mut y = last_bottom_y + 4.0;
                                         for extra in &trans_lines[ocr_lines.len()..] {
                                             if extra.trim().is_empty() { continue; }
                                             let wrap_width = (full_rect.width() - last.x + full_rect.left() - 8.0).max(100.0);
