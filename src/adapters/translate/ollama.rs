@@ -33,17 +33,7 @@ impl Translator for OllamaTranslator {
         target: &LanguageTag,
     ) -> Result<String> {
         let source_lines: Vec<&str> = text.lines().collect();
-        let (prompt_body, multi_line) = if source_lines.len() > 1 {
-            let numbered = source_lines
-                .iter()
-                .enumerate()
-                .map(|(i, l)| format!("{}. {}", i + 1, l))
-                .collect::<Vec<_>>()
-                .join("\n");
-            (numbered, true)
-        } else {
-            (text.to_string(), false)
-        };
+        let multi_line = source_lines.len() > 1;
 
         // Convert language codes to full names for better AI understanding
         let target_name = match target.0.as_str() {
@@ -64,19 +54,20 @@ impl Translator for OllamaTranslator {
 
         let system_prompt = if multi_line {
             format!(
-                "You are a professional translator. CRITICAL: Translate each numbered line into {}. \
-                 You MUST return EXACTLY the same number of lines as provided. \
-                 Keep the same numbering (N. <translation>). Do NOT skip or merge lines. \
-                 Output ONLY the translated numbered list, no extra text.",
-                target_name
+                "Translate each line into {}. \
+                 Return EXACTLY {} lines, one translation per line. \
+                 Do NOT add numbers, bullet points, or any extra text. \
+                 Do NOT merge or skip lines. Output ONLY the translations.",
+                target_name, source_lines.len()
             )
         } else {
             format!(
-                "You are a professional translator. Translate this text into {}. \
-                 Output ONLY the translated text, no explanations.",
+                "Translate into {}. Output ONLY the translation, nothing else.",
                 target_name
             )
         };
+
+        let prompt_body = text.to_string();
 
         let user_prompt = if let Some(src) = source {
             let src_name = match src.0.as_str() {

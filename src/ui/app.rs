@@ -911,62 +911,52 @@ impl App {
     /// If the response has no numbers at all (single-line or model ignored
     /// the instruction), fall back to plain line-split.
     fn parse_numbered_lines(raw: &str, ocr_count: usize) -> Vec<String> {
-        // Detect whether the response uses the numbered format.
-        let has_numbers = raw.lines().any(|l| {
-            let t = l.trim();
-            t.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false)
-        });
-
-        if !has_numbers || ocr_count == 0 {
-            // Plain split fallback - but ensure we don't return more lines than requested
-            let lines: Vec<String> = raw.lines().map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
-            if lines.len() == ocr_count {
-                return lines;
+        /// Strip leading prefixes that AI models commonly add:
+        /// "1. ", "1) ", "1: ", "- ", "* ", "• ", "n. ", etc.
+        fn strip_prefix(s: &str) -> &str {
+            let t = s.trim();
+            // Try stripping leading digits + punctuation (e.g. "1. ", "12) ", "3: ")
+            let after_digits = t.trim_start_matches(|c: char| c.is_ascii_digit());
+            if after_digits.len() < t.len() {
+                // We stripped some digits — now skip punctuation and whitespace
+                let after_punct = after_digits.trim_start_matches(|c: char| {
+                    c == '.' || c == ')' || c == ':' || c == '-' || c == '>' || c.is_whitespace()
+                });
+                if !after_punct.is_empty() {
+                    return after_punct;
+                }
             }
-            // If line count doesn't match, try to use the numbers anyway or fallback to empty
-            let mut res = vec!["ไม่มีข้อความที่ต้องแปล".to_string(); ocr_count];
-            for (idx, line) in lines.iter().enumerate().take(ocr_count) {
-                res[idx] = line.clone();
+            // Try stripping common bullet prefixes
+            for prefix in &["- ", "* ", "• ", "· ", "> "] {
+                if let Some(rest) = t.strip_prefix(prefix) {
+                    return rest.trim();
+                }
             }
-            return res;
+            t
         }
 
-        let mut result = vec!["ไม่มีข้อความที่ต้องแปล".to_string(); ocr_count];
-        for line in raw.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
+        if ocr_count == 0 {
+            return vec![];
+        }
 
-            // Find the first sequence of digits at the start of the line
-            let mut num_str = String::new();
-            for c in trimmed.chars() {
-                if c.is_ascii_digit() {
-                    num_str.push(c);
-                } else {
-                    break;
-                }
-            }
+        // Collect non-empty lines and strip prefixes
+        let cleaned: Vec<String> = raw
+            .lines()
+            .map(|l| strip_prefix(l).to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
 
-            if !num_str.is_empty() {
-                if let Ok(idx) = num_str.parse::<usize>() {
-                    if idx >= 1 && idx <= ocr_count {
-                        // Find where the actual text starts (skip the number and any punctuation like . : ) )
-                        let mut start_idx = num_str.len();
-                        let remaining = &trimmed[start_idx..];
-                        for c in remaining.chars() {
-                            if c == '.' || c == ')' || c == ':' || c.is_whitespace() {
-                                start_idx += c.len_utf8();
-                            } else {
-                                break;
-                            }
-                        }
-                        let content = trimmed[start_idx..].trim().to_string();
-                        if !content.is_empty() {
-                            result[idx - 1] = content;
-                        }
-                    }
-                }
+        if cleaned.len() == ocr_count {
+            return cleaned;
+        }
+
+        // Line count mismatch — pad or truncate
+        let mut result = Vec::with_capacity(ocr_count);
+        for i in 0..ocr_count {
+            if i < cleaned.len() {
+                result.push(cleaned[i].clone());
+            } else {
+                result.push(String::new());
             }
         }
         result
