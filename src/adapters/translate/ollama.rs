@@ -61,9 +61,22 @@ impl Translator for OllamaTranslator {
             _ => &s.0,
         });
 
-        let system = if source_lines.len() > 1 {
+        let (prompt_body, multi_line) = if source_lines.len() > 1 {
+            let numbered = source_lines
+                .iter()
+                .enumerate()
+                .map(|(i, l)| format!("{}. {}", i + 1, l))
+                .collect::<Vec<_>>()
+                .join("\n");
+            (numbered, true)
+        } else {
+            (text.to_string(), false)
+        };
+
+        let system = if multi_line {
             format!(
-                "Translate to {}. NO EXPLANATIONS. Return exactly {} lines.",
+                "Translate to {}. Return EXACTLY {} numbered lines. \
+                 Maintain the 'N. <text>' format. NO EXPLANATIONS.",
                 target_name, source_lines.len()
             )
         } else {
@@ -74,9 +87,9 @@ impl Translator for OllamaTranslator {
         };
 
         let user = if let Some(sn) = src_name {
-            format!("Translate from {} to {}:\n\n{}", sn, target_name, text)
+            format!("Translate from {} to {}:\n\n{}", sn, target_name, prompt_body)
         } else {
-            format!("Translate to {}:\n\n{}", target_name, text)
+            format!("Translate to {}:\n\n{}", target_name, prompt_body)
         };
 
         self.call_ollama(&system, &user)
