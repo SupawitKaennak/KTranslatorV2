@@ -116,15 +116,20 @@ impl Translator for GeminiTranslator {
             "Output ONLY the translated text, no explanations.".to_string()
         };
 
+        let system_instruction = "You are a professional game localizer. \
+             Translate the following text to sound natural, idiomatic, and human-like in the target language. \
+             Avoid literal, word-for-word translations that sound like a robot. \
+             Use appropriate gaming terminology and casual speech where suitable.";
+
         let prompt = if let Some(src) = source {
             format!(
-                "Translate from {} to {}. {}\n\n{}",
-                src.0, target.0, line_instruction, prompt_body
+                "{}\n\nTranslate from {} to {}. {}\n\nInput:\n{}",
+                system_instruction, src.0, target.0, line_instruction, prompt_body
             )
         } else {
             format!(
-                "Translate to {}. Auto-detect the source language. {}\n\n{}",
-                target.0, line_instruction, prompt_body
+                "{}\n\nTranslate to {}. Auto-detect the source language. {}\n\nInput:\n{}",
+                system_instruction, target.0, line_instruction, prompt_body
             )
         };
 
@@ -133,7 +138,7 @@ impl Translator for GeminiTranslator {
                 parts: vec![Part { text: prompt }],
             }],
             generation_config: Some(GenerationConfig {
-                temperature: Some(0.1),
+                temperature: Some(0.3), // Slightly higher for more natural phrasing
                 max_output_tokens: Some(4096),
                 ..Default::default()
             }),

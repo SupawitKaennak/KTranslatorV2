@@ -543,7 +543,6 @@ impl App {
             &mut self.slots_runtime,
             &mut self.last_errors,
             &self.translation_cache,
-            &self.text_translation_cache,
         );
 
         if let Some(translator) = &self.translator {
