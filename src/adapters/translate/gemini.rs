@@ -108,9 +108,10 @@ impl Translator for GeminiTranslator {
             "CRITICAL: The input is a numbered list of lines. \
              You MUST return EXACTLY the same number of lines as provided. \
              Each output line must start with its corresponding number (N. <translation>). \
-             Do NOT skip, merge, or omit any lines. \
-             Even if a line is short or empty, you must include its number. \
-             Return ONLY the numbered list, no intro, no outro, no notes."
+             Output ONLY the translation in the target language. \
+             Do NOT include the original Japanese or English text. Do NOT include explanations. \
+             If the target is Thai, output ONLY Thai. \
+             Maintain 1-to-1 mapping. No extra text."
                 .to_string()
         } else {
             "Output ONLY the translated text, no explanations.".to_string()
@@ -138,7 +139,7 @@ impl Translator for GeminiTranslator {
                 parts: vec![Part { text: prompt }],
             }],
             generation_config: Some(GenerationConfig {
-                temperature: Some(0.3), // Slightly higher for more natural phrasing
+                temperature: Some(0.1), // Lower for more deterministic line-by-line output
                 max_output_tokens: Some(4096),
                 ..Default::default()
             }),

@@ -1,64 +1,104 @@
 use anyhow::{Context, Result};
+use image::{ImageBuffer, Rgba};
 use std::collections::HashMap;
-use std::sync::Mutex;
-use windows::Graphics::Imaging::{BitmapPixelFormat, SoftwareBitmap};
+use parking_lot::Mutex;
+use std::sync::Arc;
+use windows::Graphics::Imaging::SoftwareBitmap;
 use windows::Media::Ocr::OcrEngine;
 use windows::Storage::Streams::DataWriter;
 
-use crate::core::{
-    ports::{FrameRgba, OcrEngine as OcrEngineTrait, OcrTextLine},
-    types::LanguageTag,
-};
+use crate::core::types::LanguageTag;
+use crate::core::ports::{FrameRgba, OcrTextLine};
 
 pub struct WindowsOcr {
-    /// Cache of OcrEngine instances per language tag.
-    /// Creating an OcrEngine is expensive, so we reuse them.
-    engines: Mutex<HashMap<String, OcrEngine>>,
+    engines: Arc<Mutex<HashMap<String, OcrEngine>>>,
 }
 
 impl WindowsOcr {
     pub fn new() -> Self {
         Self {
-            engines: Mutex::new(HashMap::new()),
+            engines: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    /// Build the OcrEngine for the requested language.
     fn make_engine(lang_hint: Option<&LanguageTag>) -> Result<OcrEngine> {
-        if let Some(hint) = lang_hint {
-            let tag = &hint.0;
-            if let Ok(lang) = windows::Globalization::Language::CreateLanguage(&tag.into()) {
-                return OcrEngine::TryCreateFromLanguage(&lang)
-                    .context("Failed to create OCR engine for hinted language");
+        if let Some(tag) = lang_hint {
+            let win_tag = windows::Globalization::Language::CreateLanguage(&windows::core::HSTRING::from(&tag.0))?;
+            if let Ok(engine) = OcrEngine::TryCreateFromLanguage(&win_tag) {
+                return Ok(engine);
             }
         }
-        OcrEngine::TryCreateFromUserProfileLanguages()
-            .context("Failed to create default OCR engine")
+        Ok(OcrEngine::TryCreateFromUserProfileLanguages()?)
     }
 
-    /// Convert FrameRgba (RGBA8) to a SoftwareBitmap (Bgra8) suitable for Windows OCR.
     fn to_software_bitmap(frame: &FrameRgba) -> Result<SoftwareBitmap> {
-        let mut bgra: Vec<u8> = Vec::with_capacity(frame.data.len());
-        for chunk in frame.data.chunks_exact(4) {
-            bgra.push(chunk[2]); // B
-            bgra.push(chunk[1]); // G
-            bgra.push(chunk[0]); // R
-            bgra.push(chunk[3]); // A
-        }
-        let writer = DataWriter::new()?;
-        writer.WriteBytes(&bgra)?;
-        let buffer = writer.DetachBuffer()?;
-        SoftwareBitmap::CreateCopyFromBuffer(
-            &buffer,
-            BitmapPixelFormat::Bgra8,
+        let bitmap = SoftwareBitmap::Create(
+            windows::Graphics::Imaging::BitmapPixelFormat::Rgba8,
             frame.width as i32,
             frame.height as i32,
-        )
-        .context("create SoftwareBitmap")
+        )?;
+
+        let dw = DataWriter::new()?;
+        dw.WriteBytes(&frame.data)?;
+        let buffer = dw.DetachBuffer()?;
+
+        bitmap.CopyFromBuffer(&buffer)?;
+        Ok(bitmap)
     }
 
-    /// Run Windows OCR and return one `OcrTextLine` per recognised line,
-    /// each carrying its bounding box in image-pixel coordinates.
+    fn preprocess(frame: &FrameRgba) -> (FrameRgba, f32) {
+        let Some(img) = ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(frame.width, frame.height, frame.data.clone()) else {
+            return (frame.clone(), 1.0);
+        };
+
+        let dynamic = image::DynamicImage::ImageRgba8(img);
+        let sharpened = dynamic.unsharpen(1.0, 15);
+        let gray_img = sharpened.to_luma8();
+
+        let (processed_img, final_scale) = if frame.height < 1200 {
+            let scale = 3.0;
+            let new_w = (frame.width as f32 * scale) as u32;
+            let new_h = (frame.height as f32 * scale) as u32;
+            let resized = image::imageops::resize(&gray_img, new_w, new_h, image::imageops::FilterType::CatmullRom);
+            (resized, scale)
+        } else {
+            (gray_img, 1.0)
+        };
+        let scale = final_scale;
+
+        let mut final_img: image::ImageBuffer<image::Luma<u8>, Vec<u8>> = processed_img;
+        
+        // Dynamic Contrast Stretching instead of hard thresholding
+        // This is much safer for manga with screentones/grey backgrounds.
+        let mut min_v = 255u8;
+        let mut max_v = 0u8;
+        for pixel in final_img.pixels() {
+            let v = pixel.0[0];
+            if v < min_v { min_v = v; }
+            if v > max_v { max_v = v; }
+        }
+        
+        if max_v > min_v {
+            let range = (max_v - min_v) as f32;
+            for pixel in final_img.pixels_mut() {
+                let v = pixel.0[0];
+                let normalized = ((v - min_v) as f32 / range * 255.0) as u8;
+                pixel.0[0] = normalized;
+            }
+        }
+
+        let final_rgba = image::DynamicImage::ImageLuma8(final_img).to_rgba8();
+        
+        (
+            FrameRgba {
+                width: final_rgba.width(),
+                height: final_rgba.height(),
+                data: final_rgba.into_raw(),
+            },
+            scale,
+        )
+    }
+
     pub fn recognize_lines(
         &self,
         frame: &FrameRgba,
@@ -69,14 +109,15 @@ impl WindowsOcr {
             .unwrap_or_else(|| "default".to_string());
 
         let engine = {
-            let mut cache = self.engines.lock().unwrap();
+            let mut cache = self.engines.lock();
             if !cache.contains_key(&lang_key) {
                 cache.insert(lang_key.clone(), Self::make_engine(lang_hint)?);
             }
             cache.get(&lang_key).unwrap().clone()
         };
 
-        let bitmap = Self::to_software_bitmap(frame)?;
+        let (processed_frame, scale) = Self::preprocess(frame);
+        let bitmap = Self::to_software_bitmap(&processed_frame)?;
 
         let operation = engine.RecognizeAsync(&bitmap)?;
         while operation.Status()?.0 == 0 {
@@ -91,51 +132,50 @@ impl WindowsOcr {
         for idx in 0..count {
             let line = lines.GetAt(idx)?;
             let text = line.Text()?.to_string();
-            // Skip noise: empty lines, single chars, or pure punctuation/whitespace.
-            // Manga scans often produce many 1-2 char OCR fragments from artwork.
+            
             let trimmed = text.trim();
-            if trimmed.len() < 3 || trimmed.chars().all(|c| !c.is_alphanumeric()) {
+            if trimmed.is_empty() {
                 continue;
             }
 
-            // Compute the bounding rect as the union of all word bounding rects.
+            // OcrLine doesn't have a direct Rect property. 
+            // We must calculate the bounding box from its words.
             let words = line.Words()?;
             let word_count = words.Size()?;
+            if word_count == 0 { continue; }
+
             let mut min_x = f32::MAX;
             let mut min_y = f32::MAX;
             let mut max_x = f32::MIN;
             let mut max_y = f32::MIN;
 
-            for wi in 0..word_count {
-                let word = words.GetAt(wi)?;
-                let r = word.BoundingRect()?;
-                if r.X < min_x { min_x = r.X; }
-                if r.Y < min_y { min_y = r.Y; }
-                if r.X + r.Width  > max_x { max_x = r.X + r.Width; }
-                if r.Y + r.Height > max_y { max_y = r.Y + r.Height; }
+            for w_idx in 0..word_count {
+                let word = words.GetAt(w_idx)?;
+                let rect = word.BoundingRect()?;
+                min_x = min_x.min(rect.X);
+                min_y = min_y.min(rect.Y);
+                max_x = max_x.max(rect.X + rect.Width);
+                max_y = max_y.max(rect.Y + rect.Height);
             }
-
-            if min_x < f32::MAX {
-                out.push(OcrTextLine {
-                    text,
-                    x: min_x,
-                    y: min_y,
-                    w: max_x - min_x,
-                    h: max_y - min_y,
-                });
-            }
+            
+            out.push(OcrTextLine {
+                text,
+                x: min_x / scale,
+                y: min_y / scale,
+                w: (max_x - min_x) / scale,
+                h: (max_y - min_y) / scale,
+            });
         }
+
         Ok(out)
     }
-}
 
-impl OcrEngineTrait for WindowsOcr {
-    fn recognize(&self, frame: &FrameRgba, lang_hint: Option<&LanguageTag>) -> Result<String> {
+    pub fn recognize(&self, frame: &FrameRgba, lang_hint: Option<&LanguageTag>) -> Result<String> {
         let lines = self.recognize_lines(frame, lang_hint)?;
-        Ok(lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n"))
-    }
-
-    fn recognize_lines(&self, frame: &FrameRgba, lang_hint: Option<&LanguageTag>) -> Result<Vec<OcrTextLine>> {
-        self.recognize_lines(frame, lang_hint)
+        let full_text = lines.iter()
+            .map(|l| l.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        Ok(full_text)
     }
 }

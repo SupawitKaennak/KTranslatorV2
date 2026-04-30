@@ -3,8 +3,9 @@ use std::collections::HashMap;
 use parking_lot::Mutex;
 use crate::core::{
     model::AppModel,
-    ports::{FrameRgba, FrameSource, Translator},
+    ports::{FrameSource, Translator, OcrTextLine},
     worker::{BgResult, SlotRuntimeState, smart_hash},
+    text_cleaner::TextCleaner,
 };
 use crate::adapters::{
     ocr::windows_ocr::WindowsOcr,
@@ -136,7 +137,7 @@ impl BackgroundCoordinator {
                         slot.next_tick_at_ms = Self::now_ms() + 50;
                     }
                 }
-                BgResult::CacheHit { slot_idx, language_version, ocr_text, translated, frame_hash } => {
+                BgResult::CacheHit { slot_idx, language_version, ocr_text, translated, frame_hash, ocr_lines } => {
                     if let Some(runtime) = slots_runtime.get_mut(slot_idx) {
                         let mut model = model_arc.lock();
                         let slot = match model.slots.get_mut(slot_idx) {
@@ -157,18 +158,12 @@ impl BackgroundCoordinator {
 
                         slot.last_ocr_text = ocr_text;
                         slot.last_translation = translated.clone();
-                        slot.last_trans_lines = translated.lines().map(|s| s.to_string()).collect(); // Cache hits are already padded/processed usually, but let's be safe.
-                        // Actually, better to use parse_numbered_lines here too if we want alignment.
-                        // But cache entries were saved via parse_numbered_lines? 
-                        // No, cache saves the RAW translated string.
+                        slot.last_ocr_lines = ocr_lines; // Update positions!
                         
-                        let _ocr_count = slot.last_ocr_lines.len(); // This might be wrong if last_ocr_lines is empty?
-                        // Wait, CacheHit doesn't include ocr_lines.
-                        // We should probably include them in CacheHit or at least the count.
-                        // For now, let's just split by lines.
-                        slot.last_trans_lines = translated.lines().map(|s| s.to_string()).collect();
+                        // Re-align cached translation to the current OCR lines
+                        slot.last_trans_lines = Self::parse_numbered_lines(&translated, slot.last_ocr_lines.len());
 
-                        slot.next_tick_at_ms = Self::now_ms() + slot.refresh_ms.max(500);
+                        slot.next_tick_at_ms = Self::now_ms() + slot.refresh_ms.max(200);
                     }
                 }
                 BgResult::Translating { slot_idx } => {
@@ -315,45 +310,25 @@ impl BackgroundCoordinator {
                             return Ok(BgResult::Unchanged { slot_idx: i });
                         }
 
+                        let _ = tx_inner.send(BgResult::StatusUpdate { slot_idx: i, status: "OCR...".to_string() });
+                        let ocr_lines = windows_ocr.recognize_lines(&frame, source_lang.as_ref())?;
+                        
+                        // --- Grouping disabled as it caused UI chaos and AI confusion ---
+                        // let ocr_lines = Self::group_ocr_lines(raw_ocr_lines);
+
                         let cache_key = (hash, source_lang.as_ref().map(|l| l.0.clone()), target_lang.0.clone());
                         {
                             let cache = cache_arc.lock();
                             if let Some((ocr, tra)) = cache.get(&cache_key) {
                                 return Ok(BgResult::CacheHit {
-                                    slot_idx: i, language_version, ocr_text: ocr.clone(), translated: tra.clone(), frame_hash: hash,
+                                    slot_idx: i, language_version, ocr_text: ocr.clone(), translated: tra.clone(), frame_hash: hash, ocr_lines
                                 });
                             }
                         }
-
-                        let _ = tx_inner.send(BgResult::Translating { slot_idx: i });
                         
-                        // FAST UPSCALING: Use a simple sampling loop (Nearest Neighbor) 
-                        // instead of heavy bilinear interpolation. This is much faster
-                        // during gameplay and sufficient for Windows OCR.
-                        let scale = 2u32;
-                        let new_w = frame.width * scale;
-                        let new_h = frame.height * scale;
-                        let mut upscaled = vec![0u8; (new_w * new_h * 4) as usize];
-                        for dst_y in 0..new_h {
-                            let src_y = dst_y / scale;
-                            let src_row_start = (src_y * frame.width) as usize * 4;
-                            let dst_row_start = (dst_y * new_w) as usize * 4;
-                            for dst_x in 0..new_w {
-                                let src_x = dst_x / scale;
-                                let src_idx = src_row_start + (src_x as usize * 4);
-                                let dst_idx = dst_row_start + (dst_x as usize * 4);
-                                upscaled[dst_idx..dst_idx+4].copy_from_slice(&frame.data[src_idx..src_idx+4]);
-                            }
-                        }
-                        let preprocessed_frame = FrameRgba { width: new_w, height: new_h, data: upscaled };
-
-                        let _ = tx_inner.send(BgResult::StatusUpdate { slot_idx: i, status: "OCR...".to_string() });
-                        let mut ocr_lines = windows_ocr.recognize_lines(&preprocessed_frame, source_lang.as_ref())?;
-                        let inv_scale = 1.0 / scale as f32;
-                        for line in &mut ocr_lines {
-                            line.x *= inv_scale; line.y *= inv_scale; line.w *= inv_scale; line.h *= inv_scale;
-                        }
-                        let ocr_text = ocr_lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n").trim().to_string();
+                        // Clean the OCR text using LunaTranslator-style filters
+                        let raw_ocr_text = ocr_lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n");
+                        let ocr_text = TextCleaner::clean(&raw_ocr_text);
 
                         if ocr_text.is_empty() {
                             return Ok(BgResult::Done {
@@ -394,6 +369,7 @@ impl BackgroundCoordinator {
 
                         let _ = tx_inner.send(BgResult::StatusUpdate { slot_idx: i, status: "Translating (AI)...".to_string() });
                         let translated = translator.translate(&ocr_text, source_lang.as_ref(), &target_lang)?;
+
                         {
                             let text_hash = {
                                 let mut h: u64 = 0xcbf29ce484222325;
@@ -430,48 +406,100 @@ impl BackgroundCoordinator {
     /// Parse a numbered translation response back into a Vec aligned to
     /// the original OCR lines.
     fn parse_numbered_lines(raw: &str, ocr_count: usize) -> Vec<String> {
-        fn strip_prefix(s: &str) -> &str {
-            let t = s.trim();
-            if t.is_empty() {
-                return t;
-            }
-            let after_digits = t.trim_start_matches(|c: char| c.is_ascii_digit());
-            if after_digits.len() < t.len() {
-                let after_punct = after_digits.trim_start_matches(|c: char| {
-                    c == '.' || c == ')' || c == ':' || c == '-' || c == '>' || c.is_whitespace()
-                });
-                if !after_punct.is_empty() {
-                    return after_punct;
-                }
-            }
-            for prefix in &["- ", "* ", "• ", "· ", "> "] {
-                if let Some(rest) = t.strip_prefix(prefix) {
-                    return rest.trim();
-                }
-            }
-            t
-        }
-
         if ocr_count == 0 {
             return vec![];
         }
-        let all_lines: Vec<String> = raw.lines().map(|l| strip_prefix(l).to_string()).collect();
-        if all_lines.len() == ocr_count {
-            return all_lines;
-        }
-        if all_lines.len() > ocr_count {
-            let non_empty: Vec<String> = all_lines
-                .iter()
-                .filter(|s| !s.is_empty())
-                .cloned()
-                .collect();
-            if non_empty.len() == ocr_count {
-                return non_empty;
+
+        let mut result = vec![String::new(); ocr_count];
+        // Stricter regex to ensure we don't accidentally include the number in the content
+        let re_numbered = regex::Regex::new(r"^\s*(\d+)[\.\):\->\s]+(.*)$").unwrap();
+
+        for line in raw.lines() {
+            let line = line.trim();
+            if line.is_empty() { continue; }
+
+            if let Some(caps) = re_numbered.captures(line) {
+                if let Ok(num) = caps[1].parse::<usize>() {
+                    if num > 0 && num <= ocr_count {
+                        let mut content = caps[2].trim().to_string();
+                        // Strip leading junk that AI sometimes adds
+                        content = content.trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ' ' || c == '-').trim().to_string();
+                        
+                        if result[num - 1].is_empty() || result[num - 1].len() < content.len() {
+                            result[num - 1] = content;
+                        }
+                    }
+                }
+            } else {
+                for i in 0..ocr_count {
+                    if result[i].is_empty() {
+                        result[i] = line.to_string();
+                        break;
+                    }
+                }
             }
-            return all_lines.into_iter().take(ocr_count).collect();
         }
-        let mut result = all_lines;
-        result.resize(ocr_count, String::new());
+
+        for s in result.iter_mut() {
+            *s = TextCleaner::clean(s);
+        }
+
         result
+    }
+
+    /// Group OCR lines that are spatially close into "Paragraphs" for better AI context.
+    /// This mimics LunaTranslator's grouping logic.
+    /// Group OCR lines that are spatially close into "Paragraphs" for better AI context.
+    /// This mimics LunaTranslator's grouping logic.
+    fn group_ocr_lines(lines: Vec<OcrTextLine>) -> Vec<OcrTextLine> {
+        if lines.is_empty() { return vec![]; }
+        
+        let mut sorted_lines = lines;
+        // Sort by X then Y to handle vertical text better
+        sorted_lines.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
+        
+        let mut groups: Vec<OcrTextLine> = Vec::new();
+        
+        for line in sorted_lines {
+            let mut merged = false;
+            for group in groups.iter_mut() {
+                // Direction-agnostic proximity check
+                let v_dist = (line.y - (group.y + group.h)).abs().min((group.y - (line.y + line.h)).abs());
+                let h_dist = (line.x - (group.x + group.w)).abs().min((group.x - (line.x + line.w)).abs());
+                let x_overlap = line.x.max(group.x) < (line.x + line.w).min(group.x + group.w);
+                let y_overlap = line.y.max(group.y) < (line.y + line.h).min(group.y + group.h);
+
+                // Merge if:
+                // 1. Stacked vertically with horizontal overlap (Horizontal text)
+                // 2. Stacked horizontally with vertical overlap (Vertical text)
+                // 3. Just extremely close
+                if (v_dist < 30.0 && x_overlap) || (h_dist < 30.0 && y_overlap) || (v_dist < 15.0 && h_dist < 15.0) {
+                    // Update text based on reading order (roughly)
+                    if line.x < group.x || ( (line.x - group.x).abs() < 10.0 && line.y < group.y) {
+                        group.text = format!("{} {}", line.text, group.text);
+                    } else {
+                        group.text = format!("{} {}", group.text, line.text);
+                    }
+                    
+                    let min_x = group.x.min(line.x);
+                    let min_y = group.y.min(line.y);
+                    let max_x = (group.x + group.w).max(line.x + line.w);
+                    let max_y = (group.y + group.h).max(line.y + line.h);
+                    
+                    group.x = min_x;
+                    group.y = min_y;
+                    group.w = max_x - min_x;
+                    group.h = max_y - min_y;
+                    merged = true;
+                    break;
+                }
+            }
+            
+            if !merged {
+                groups.push(line);
+            }
+        }
+        
+        groups
     }
 }

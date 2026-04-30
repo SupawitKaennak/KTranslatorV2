@@ -33,6 +33,7 @@ pub enum BgResult {
         ocr_text: String,
         translated: String,
         frame_hash: u64,
+        ocr_lines: Vec<OcrTextLine>,
     },
     /// Background thread is now engaging Gemini or OCR (heavy work)
     Translating {

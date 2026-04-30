@@ -75,13 +75,18 @@ impl Translator for OllamaTranslator {
 
         let system = if multi_line {
             format!(
-                "Translate to {}. Return EXACTLY {} numbered lines. \
-                 Maintain the 'N. <text>' format. NO EXPLANATIONS.",
+                "You are a professional manga/game translator. CRITICAL: Translate each numbered line into {}. \
+                 You MUST return EXACTLY the same number of lines as provided ({} lines). \
+                 Each output line must start with its corresponding number (N. <translation>). \
+                 Output ONLY the translation in the target language. \
+                 Do NOT include the original Japanese or English text. Do NOT include explanations. \
+                 If the target is Thai, output ONLY Thai. \
+                 Maintain 1-to-1 mapping. No extra text.",
                 target_name, source_lines.len()
             )
         } else {
             format!(
-                "Translate to {}. ONLY the translation.",
+                "Translate to {}. Output ONLY the translated text, no explanations.",
                 target_name
             )
         };
@@ -112,7 +117,7 @@ impl OllamaTranslator {
             ],
             stream: false,
             options: Some(OllamaOptions {
-                temperature: 0.2,
+                temperature: 0.1,
                 num_predict: -1,
                 repeat_penalty: 1.2,   // Penalty for repeating the same words
                 presence_penalty: 0.6, // Penalty for repeating topics/lines

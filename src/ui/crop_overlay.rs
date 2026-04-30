@@ -56,14 +56,14 @@ impl CropOverlayState {
         })
     }
 
-    fn pixel_to_screen(&self, img_rect: &egui::Rect, p: Pos2) -> (i32, i32) {
+    fn pixel_to_screen(&self, img_rect: &egui::Rect, p: Pos2) -> (f32, f32) {
         let w = self.px.0 as f32;
         let h = self.px.1 as f32;
         let nx = ((p.x - img_rect.min.x) / img_rect.width()).clamp(0.0, 1.0);
         let ny = ((p.y - img_rect.min.y) / img_rect.height()).clamp(0.0, 1.0);
-        let px = (nx * w) as i32;
-        let py = (ny * h) as i32;
-        (self.origin.0 + px, self.origin.1 + py)
+        let px = nx * w;
+        let py = ny * h;
+        (self.origin.0 as f32 + px, self.origin.1 as f32 + py)
     }
 
     fn try_finish_rect(&self, img_rect: &egui::Rect, a: Pos2, b: Pos2) -> Option<Rect> {
@@ -73,7 +73,7 @@ impl CropOverlayState {
         let y = sy1.min(sy2);
         let w = (sx1 - sx2).abs();
         let h = (sy1 - sy2).abs();
-        if w < 8 || h < 8 {
+        if w < 8.0 || h < 8.0 {
             return None;
         }
         Some(Rect { x, y, w, h })

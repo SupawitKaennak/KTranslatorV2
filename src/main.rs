@@ -5,6 +5,14 @@ mod infra;
 mod ui;
 
 fn main() -> eframe::Result<()> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::UI::HiDpi::*;
+        unsafe {
+            let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        }
+    }
+
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_transparent(true),
