@@ -30,6 +30,7 @@ pub trait FrameSource: Send + Sync {
 #[allow(dead_code)] // trait contract; used by GeminiOcr and may be called directly in future
 pub trait OcrEngine: Send + Sync {
     fn recognize(&self, frame: &FrameRgba, lang_hint: Option<&LanguageTag>) -> Result<String>;
+    fn recognize_lines(&self, frame: &FrameRgba, lang_hint: Option<&LanguageTag>) -> Result<Vec<OcrTextLine>>;
 }
 
 pub trait Translator: Send + Sync {

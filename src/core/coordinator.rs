@@ -34,7 +34,6 @@ impl BackgroundCoordinator {
         slots_runtime: &mut Vec<SlotRuntimeState>,
         last_errors: &mut std::collections::BTreeMap<usize, String>,
         translation_cache: &Arc<Mutex<HashMap<(u64, Option<String>, String), (String, String)>>>,
-        text_translation_cache: &Arc<Mutex<HashMap<(u64, Option<String>, String), String>>>,
     ) {
         while let Ok(result) = self.bg_rx.try_recv() {
             match result {
@@ -362,29 +361,35 @@ impl BackgroundCoordinator {
                             });
                         }
 
-                        if source_lang.as_ref().map(|s| s.0 == target_lang.0).unwrap_or(false) {
-                            let mut cache = cache_arc.lock();
-                            cache.insert(cache_key, (ocr_text.clone(), ocr_text.clone()));
-                            return Ok(BgResult::Done {
-                                slot_idx: i, language_version, ocr_text: ocr_text.clone(), translated: ocr_text, frame_hash: hash, ocr_lines,
-                            });
-                        }
-
+                        // --- NEW: Aggressive Text-Level Cache Check ---
+                        // Even if the frame hash changed, if the OCR text is identical to what we
+                        // already translated, reuse it and update the frame-hash cache.
                         {
                             let text_hash = {
                                 let mut h: u64 = 0xcbf29ce484222325;
                                 for b in ocr_text.as_bytes() { h ^= *b as u64; h = h.wrapping_mul(0x100000001b3); }
                                 h
                             };
-                            let text_cache_key = (text_hash, source_lang.as_ref().map(|l| l.0.clone()), target_lang.0.clone());
-                            let cached = { let text_cache = text_cache_arc.lock(); text_cache.get(&text_cache_key).cloned() };
+                            let tc_key = (text_hash, source_lang.as_ref().map(|l| l.0.clone()), target_lang.0.clone());
+                            let cached = { let tc = text_cache_arc.lock(); tc.get(&tc_key).cloned() };
+                            
                             if let Some(cached_trans) = cached {
-                                let mut cache = cache_arc.lock();
-                                cache.insert(cache_key, (ocr_text.clone(), cached_trans.clone()));
+                                // Update frame-hash cache so next time we hit the fast-path earlier
+                                let mut fc = cache_arc.lock();
+                                fc.insert(cache_key, (ocr_text.clone(), cached_trans.clone()));
+                                
                                 return Ok(BgResult::Done {
-                                    slot_idx: i, language_version, ocr_text, translated: cached_trans, frame_hash: hash, ocr_lines,
+                                    slot_idx: i, language_version, ocr_text, translated: cached_trans, frame_hash: hash, ocr_lines
                                 });
                             }
+                        }
+
+                        if source_lang.as_ref().map(|s| s.0 == target_lang.0).unwrap_or(false) {
+                            let mut cache = cache_arc.lock();
+                            cache.insert(cache_key, (ocr_text.clone(), ocr_text.clone()));
+                            return Ok(BgResult::Done {
+                                slot_idx: i, language_version, ocr_text: ocr_text.clone(), translated: ocr_text, frame_hash: hash, ocr_lines,
+                            });
                         }
 
                         let _ = tx_inner.send(BgResult::StatusUpdate { slot_idx: i, status: "Translating (AI)...".to_string() });

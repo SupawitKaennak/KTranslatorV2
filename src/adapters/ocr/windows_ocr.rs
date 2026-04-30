@@ -134,4 +134,8 @@ impl OcrEngineTrait for WindowsOcr {
         let lines = self.recognize_lines(frame, lang_hint)?;
         Ok(lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n"))
     }
+
+    fn recognize_lines(&self, frame: &FrameRgba, lang_hint: Option<&LanguageTag>) -> Result<Vec<OcrTextLine>> {
+        self.recognize_lines(frame, lang_hint)
+    }
 }

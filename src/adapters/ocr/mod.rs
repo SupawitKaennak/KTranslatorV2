@@ -1,2 +1,3 @@
-pub mod gemini_ocr;
 pub mod windows_ocr;
+#[cfg(not(windows))]
+pub mod tesseract_ocr;
