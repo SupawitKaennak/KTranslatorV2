@@ -617,6 +617,7 @@ impl App {
                 self.last_errors.insert(999, format!("{e:#}"));
             } else {
                 self.translator = create_translator(&self.settings);
+                self.paddle_ocr = Arc::new(crate::adapters::ocr::paddle_ocr::PaddleOcr::new(self.settings.paddle_ocr_path.clone()));
                 self.last_errors.clear();
                 self.show_settings = false;
                 self.settings_edit = None; // Clean up

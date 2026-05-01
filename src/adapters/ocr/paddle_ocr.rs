@@ -51,6 +51,9 @@ impl PaddleOcr {
             }
 
             let exe_path = std::path::Path::new(&self.exe_path);
+            if !exe_path.exists() {
+                return Err(anyhow!("PaddleOCR-json.exe not found at: {}\nPlease check the path in settings.", self.exe_path));
+            }
             let working_dir = exe_path.parent().unwrap_or_else(|| std::path::Path::new("."));
 
             use std::os::windows::process::CommandExt;
