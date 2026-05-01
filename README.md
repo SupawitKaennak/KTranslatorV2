@@ -5,7 +5,7 @@
 <img width="559" height="333" alt="{C93780CF-C104-4925-8ECD-1726E73F654D}" src="https://github.com/user-attachments/assets/6855e97f-9d64-4574-a113-ede638fd1443" /><br>
 <img width="562" height="332" alt="{A77DBB38-1A99-4DB6-A647-D0B3F0C39459}" src="https://github.com/user-attachments/assets/2efd1545-468b-4e9b-9f83-df0c20280ae4" />
 
-## ✨ ความสามารถเด่น (Features)
+## ความสามารถเด่น (Features)
 
 - **Real-time Translation:** จับภาพและแปลภาษาบนหน้าจอได้ทันที
 - **Dual OCR Engine:**
@@ -20,7 +20,7 @@
 
 ---
 
-## 🛠️ ความต้องการของระบบ (Requirements)
+## ความต้องการของระบบ (Requirements)
 
 เพื่อให้โปรแกรมทำงานได้สมบูรณ์ คุณต้องติดตั้งสิ่งเหล่านี้:
 
@@ -42,7 +42,7 @@
 
 ---
 
-## 🚀 วิธีการใช้งาน
+## วิธีการใช้งาน
 
 1. **ตั้งค่า OCR:** เข้าไปที่ฟันเฟือง (Settings) เลือก OCR Engine ที่ต้องการ
    - หากใช้ PaddleOCR ให้ระบุที่อยู่ไฟล์ `.exe` ให้ถูกต้อง
@@ -53,7 +53,7 @@
 
 ---
 
-## 🔧 การแก้ปัญหาเบื้องต้น (Troubleshooting)
+## การแก้ปัญหาเบื้องต้น (Troubleshooting)
 
 - **Access is denied (os error 5):** ตรวจสอบว่าในช่อง PaddleOCR Path คุณระบุถึงตัวไฟล์ `.exe` หรือยัง (ต้องไม่ใช่แค่ชื่อโฟลเดอร์)
 - **แปลไม่ออก/ตัวหนังสือเพี้ยน:** หากใช้ Windows OCR ให้ตรวจสอบว่าลง Language Pack ครบถ้วนหรือไม่ หากเป็นมังงะแนะนำให้เปลี่ยนไปใช้ PaddleOCR
@@ -61,6 +61,6 @@
 
 ---
 
-## 🛡️ สัญญาอนุญาต (License)
+## สัญญาอนุญาต (License)
 
 Copyright (c) 2026 Supawit Kaennak [GPL v3.0](LICENSE). All rights reserved.
