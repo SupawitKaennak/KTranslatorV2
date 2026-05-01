@@ -30,7 +30,7 @@ pub fn show_settings_window(
         viewport_id,
         egui::ViewportBuilder::default()
             .with_title("KTranslator - Settings")
-            .with_inner_size([500.0, 350.0])
+            .with_inner_size([550.0, 600.0])
             .with_resizable(true)
             .with_always_on_top(),
         move |ctx, _| {
@@ -231,6 +231,50 @@ pub fn show_settings_window(
                         ui.small("Make sure Ollama is running before clicking Save & Apply.");
                     }
                 }
+
+                ui.add_space(12.0);
+                ui.separator();
+                ui.heading("📺 Overlay Appearance");
+                egui::Grid::new("overlay_settings_grid")
+                    .num_columns(2)
+                    .spacing([20.0, 8.0])
+                    .show(ui, |ui| {
+                        ui.label("Background Color:");
+                        let mut bg_color = egui::Color32::from_rgba_unmultiplied(
+                            settings.overlay_bg_color[0],
+                            settings.overlay_bg_color[1],
+                            settings.overlay_bg_color[2],
+                            settings.overlay_bg_color[3],
+                        );
+                        if ui.color_edit_button_srgba(&mut bg_color).changed() {
+                            settings.overlay_bg_color = bg_color.to_array();
+                        }
+                        ui.end_row();
+
+                        ui.label("Text Color:");
+                        let mut text_color = egui::Color32::from_rgba_unmultiplied(
+                            settings.overlay_text_color[0],
+                            settings.overlay_text_color[1],
+                            settings.overlay_text_color[2],
+                            settings.overlay_text_color[3],
+                        );
+                        if ui.color_edit_button_srgba(&mut text_color).changed() {
+                            settings.overlay_text_color = text_color.to_array();
+                        }
+                        ui.end_row();
+
+                        ui.label("Font Size:");
+                        ui.add(egui::Slider::new(&mut settings.overlay_font_size, 8.0..=48.0).suffix("px"));
+                        ui.end_row();
+
+                        ui.label("Padding:");
+                        ui.add(egui::Slider::new(&mut settings.overlay_padding, 0.0..=20.0).suffix("px"));
+                        ui.end_row();
+
+                        ui.label("Corner Radius:");
+                        ui.add(egui::Slider::new(&mut settings.overlay_corner_radius, 0.0..=20.0).suffix("px"));
+                        ui.end_row();
+                    });
 
                 ui.add_space(12.0);
                 ui.separator();

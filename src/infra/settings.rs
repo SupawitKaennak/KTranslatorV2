@@ -28,6 +28,13 @@ pub struct Settings {
     pub ollama_url: String,
     pub ollama_model: String,
     pub dark_mode: bool,
+
+    // Overlay Customization
+    pub overlay_bg_color: [u8; 4],
+    pub overlay_text_color: [u8; 4],
+    pub overlay_font_size: f32,
+    pub overlay_padding: f32,
+    pub overlay_corner_radius: f32,
 }
 
 impl Default for Settings {
@@ -43,6 +50,11 @@ impl Default for Settings {
             ollama_url: "http://localhost:11434".to_string(),
             ollama_model: "llama3.2:1b".to_string(),
             dark_mode: true,
+            overlay_bg_color: [0, 0, 0, 180], // Semi-transparent black
+            overlay_text_color: [255, 255, 255, 255], // White
+            overlay_font_size: 14.0,
+            overlay_padding: 4.0,
+            overlay_corner_radius: 4.0,
         }
     }
 }
