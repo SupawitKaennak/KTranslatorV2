@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use parking_lot::Mutex;
 use crate::core::{
     model::AppModel,
-    ports::{FrameSource, Translator, OcrTextLine},
+    ports::{FrameSource, Translator},
     worker::{BgResult, SlotRuntimeState, smart_hash},
     text_cleaner::TextCleaner,
 };
@@ -166,12 +166,6 @@ impl BackgroundCoordinator {
                         slot.next_tick_at_ms = Self::now_ms() + slot.refresh_ms.max(200);
                     }
                 }
-                BgResult::Translating { slot_idx } => {
-                    if let Some(runtime) = slots_runtime.get_mut(slot_idx) {
-                        runtime.processing = true;
-                        runtime.status = "Translating...".to_string();
-                    }
-                }
                 BgResult::StatusUpdate { slot_idx, status } => {
                     if let Some(runtime) = slots_runtime.get_mut(slot_idx) {
                         runtime.status = status;
@@ -326,7 +320,6 @@ impl BackgroundCoordinator {
                             }
                         }
                         
-                        // Clean the OCR text using LunaTranslator-style filters
                         let raw_ocr_text = ocr_lines.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n");
                         let ocr_text = TextCleaner::clean(&raw_ocr_text);
 
@@ -443,63 +436,6 @@ impl BackgroundCoordinator {
         for s in result.iter_mut() {
             *s = TextCleaner::clean(s);
         }
-
         result
-    }
-
-    /// Group OCR lines that are spatially close into "Paragraphs" for better AI context.
-    /// This mimics LunaTranslator's grouping logic.
-    /// Group OCR lines that are spatially close into "Paragraphs" for better AI context.
-    /// This mimics LunaTranslator's grouping logic.
-    fn group_ocr_lines(lines: Vec<OcrTextLine>) -> Vec<OcrTextLine> {
-        if lines.is_empty() { return vec![]; }
-        
-        let mut sorted_lines = lines;
-        // Sort by X then Y to handle vertical text better
-        sorted_lines.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap_or(std::cmp::Ordering::Equal));
-        
-        let mut groups: Vec<OcrTextLine> = Vec::new();
-        
-        for line in sorted_lines {
-            let mut merged = false;
-            for group in groups.iter_mut() {
-                // Direction-agnostic proximity check
-                let v_dist = (line.y - (group.y + group.h)).abs().min((group.y - (line.y + line.h)).abs());
-                let h_dist = (line.x - (group.x + group.w)).abs().min((group.x - (line.x + line.w)).abs());
-                let x_overlap = line.x.max(group.x) < (line.x + line.w).min(group.x + group.w);
-                let y_overlap = line.y.max(group.y) < (line.y + line.h).min(group.y + group.h);
-
-                // Merge if:
-                // 1. Stacked vertically with horizontal overlap (Horizontal text)
-                // 2. Stacked horizontally with vertical overlap (Vertical text)
-                // 3. Just extremely close
-                if (v_dist < 30.0 && x_overlap) || (h_dist < 30.0 && y_overlap) || (v_dist < 15.0 && h_dist < 15.0) {
-                    // Update text based on reading order (roughly)
-                    if line.x < group.x || ( (line.x - group.x).abs() < 10.0 && line.y < group.y) {
-                        group.text = format!("{} {}", line.text, group.text);
-                    } else {
-                        group.text = format!("{} {}", group.text, line.text);
-                    }
-                    
-                    let min_x = group.x.min(line.x);
-                    let min_y = group.y.min(line.y);
-                    let max_x = (group.x + group.w).max(line.x + line.w);
-                    let max_y = (group.y + group.h).max(line.y + line.h);
-                    
-                    group.x = min_x;
-                    group.y = min_y;
-                    group.w = max_x - min_x;
-                    group.h = max_y - min_y;
-                    merged = true;
-                    break;
-                }
-            }
-            
-            if !merged {
-                groups.push(line);
-            }
-        }
-        
-        groups
     }
 }

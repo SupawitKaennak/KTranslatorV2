@@ -35,10 +35,6 @@ pub enum BgResult {
         frame_hash: u64,
         ocr_lines: Vec<OcrTextLine>,
     },
-    /// Background thread is now engaging Gemini or OCR (heavy work)
-    Translating {
-        slot_idx: usize,
-    },
     /// Direct status update for the UI spinner/label
     StatusUpdate {
         slot_idx: usize,

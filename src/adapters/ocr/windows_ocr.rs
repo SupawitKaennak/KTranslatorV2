@@ -170,12 +170,4 @@ impl WindowsOcr {
         Ok(out)
     }
 
-    pub fn recognize(&self, frame: &FrameRgba, lang_hint: Option<&LanguageTag>) -> Result<String> {
-        let lines = self.recognize_lines(frame, lang_hint)?;
-        let full_text = lines.iter()
-            .map(|l| l.text.clone())
-            .collect::<Vec<_>>()
-            .join("\n");
-        Ok(full_text)
-    }
 }
