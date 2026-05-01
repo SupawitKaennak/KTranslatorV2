@@ -10,9 +10,17 @@ pub enum TranslationProvider {
     Ollama,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OcrEngineType {
+    Windows,
+    Paddle,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Settings {
     pub provider: TranslationProvider,
+    pub ocr_engine: OcrEngineType,
+    pub paddle_ocr_path: String,
     pub gemini_api_key: String,
     pub gemini_model: String,
     pub groq_api_key: String,
@@ -26,6 +34,8 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             provider: TranslationProvider::Gemini,
+            ocr_engine: OcrEngineType::Windows,
+            paddle_ocr_path: String::new(),
             gemini_api_key: String::new(),
             gemini_model: "gemini-2.0-flash".to_string(),
             groq_api_key: String::new(),

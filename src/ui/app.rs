@@ -57,6 +57,8 @@ pub struct App {
 
     /// Local OCR engine (Offline)
     windows_ocr: Arc<WindowsOcr>,
+    /// Advanced Local OCR engine (Paddle)
+    paddle_ocr: Arc<crate::adapters::ocr::paddle_ocr::PaddleOcr>,
 
     /// Text-only translator via selected provider (Gemini/Groq/Ollama)
     translator: Option<Arc<dyn Translator + Send + Sync>>,
@@ -177,6 +179,8 @@ impl App {
 
         let coordinator = BackgroundCoordinator::new();
 
+        let paddle_ocr = Arc::new(crate::adapters::ocr::paddle_ocr::PaddleOcr::new(settings.paddle_ocr_path.clone()));
+
         Self {
             model: Arc::new(Mutex::new(AppModel::new_default())),
             settings,
@@ -189,6 +193,7 @@ impl App {
             crop_finish: Arc::new(Mutex::new(None)),
             capture: Arc::new(ScreenshotsCapture::new()),
             windows_ocr: Arc::new(WindowsOcr::new()),
+            paddle_ocr,
             translator,
             coordinator,
             slots_runtime: vec![SlotRuntimeState::new()],
@@ -310,6 +315,7 @@ impl App {
     }
 
     fn ui_frames(&mut self, ctx: &egui::Context) {
+        let ppp = ctx.pixels_per_point();
         let model_slots: Vec<_> = { self.model.lock().slots.clone() };
         for slot in model_slots {
             if !slot.show_frame && !slot.overlay_mode {
@@ -340,8 +346,8 @@ impl App {
                     .with_always_on_top()
                     .with_mouse_passthrough(true)
                     .with_active(false) // CRITICAL: Prevent focus theft and black boxes
-                    .with_inner_size(egui::vec2(r.w as f32, r.h as f32))
-                    .with_position(egui::pos2(r.x as f32, r.y as f32)),
+                    .with_inner_size(egui::vec2(r.w / ppp, r.h / ppp))
+                    .with_position(egui::pos2(r.x / ppp, r.y / ppp)),
                 move |ctx, class| {
                     if matches!(class, egui::ViewportClass::Embedded) {
                         egui::CentralPanel::default().show(ctx, |ui| {
@@ -385,11 +391,12 @@ impl App {
                                             .unwrap_or("");
                                         if trans.trim().is_empty() { continue; }
 
-                                        // Font size ~90% of OCR line height, clamped sensibly
-                                        let font_size = (ocr_line.h * 0.90).clamp(11.0, 26.0);
+                                        // Font size: Capped strictly at 18px for better manga feel
+                                        let base_h = if ocr_line.h > 40.0 { 24.0 } else { ocr_line.h };
+                                        let font_size = (base_h as f32 * 0.80 / ppp).clamp(11.0, 18.0);
 
                                         // Wrap text within region width
-                                        let wrap_width = (max_text_w - ocr_line.x + full_rect.left()).max(100.0);
+                                        let wrap_width = (max_text_w - (ocr_line.x as f32 / ppp) + full_rect.left()).max(100.0);
                                         let galley = ctx.fonts(|f| {
                                             f.layout(
                                                 trans.to_string(),
@@ -399,18 +406,13 @@ impl App {
                                             )
                                         });
 
-                                        // ── Collision Avoidance ──────────────────────────────────────
-                                        // Ensure this line starts AFTER the previous line's background
-                                        let mut start_y = ocr_line.y;
-                                        if start_y < last_bottom_y {
-                                            start_y = last_bottom_y + 1.0; // Small 1px gap
-                                        }
+                                        let start_y = ocr_line.y / ppp;
 
                                         // Background covers the ENTIRE OCR line area to fully hide original text
-                                        let bg_w = ocr_line.w.max(galley.size().x + 10.0).min(wrap_width + 10.0);
-                                        let bg_h = ocr_line.h.max(galley.size().y + 4.0);
+                                        let bg_w = (ocr_line.w / ppp).max(galley.size().x + 10.0).min(wrap_width + 10.0);
+                                        let bg_h = (ocr_line.h / ppp).max(galley.size().y + 4.0);
                                         let bg = egui::Rect::from_min_size(
-                                            egui::pos2(ocr_line.x - 2.0, start_y - 1.0),
+                                            egui::pos2((ocr_line.x / ppp) - 2.0, start_y - 1.0),
                                             egui::vec2(bg_w + 4.0, bg_h + 2.0),
                                         );
                                         
@@ -426,7 +428,7 @@ impl App {
 
                                         // Center text vertically within the calculated background box
                                         let text_y = start_y + (bg_h - galley.size().y) / 2.0;
-                                        let text_pos = egui::pos2(ocr_line.x, text_y);
+                                        let text_pos = egui::pos2(ocr_line.x / ppp, text_y);
                                         painter.galley(text_pos, galley, egui::Color32::WHITE);
                                     }
 
@@ -436,7 +438,7 @@ impl App {
                                         let mut y = last_bottom_y + 4.0;
                                         for extra in &trans_lines[ocr_lines.len()..] {
                                             if extra.trim().is_empty() { continue; }
-                                            let wrap_width = (full_rect.width() - last.x + full_rect.left() - 8.0).max(100.0);
+                                            let wrap_width = (full_rect.width() - (last.x as f32 / ppp) + full_rect.left() - 8.0).max(100.0);
                                             let galley = ctx.fonts(|f| {
                                                 f.layout(
                                                     extra.clone(),
@@ -445,7 +447,7 @@ impl App {
                                                     wrap_width,
                                                 )
                                             });
-                                            let pos = egui::pos2(last.x, y);
+                                            let pos = egui::pos2(last.x as f32 / ppp, y);
                                             let bg = egui::Rect::from_min_size(
                                                 pos - egui::vec2(5.0, 3.0),
                                                 galley.size() + egui::vec2(10.0, 6.0),
@@ -502,8 +504,9 @@ impl App {
                                 let mut m = model_arc.lock();
                                 if slot_id < m.slots.len() {
                                     if let Some(rect) = m.slots[slot_id].rect.as_mut() {
-                                        rect.x += delta.x as i32;
-                                        rect.y += delta.y as i32;
+                                        // delta is in points, rect is in pixels
+                                        rect.x += delta.x * ppp;
+                                        rect.y += delta.y * ppp;
                                     }
                                 }
                             }
@@ -545,17 +548,17 @@ impl App {
             &self.translation_cache,
         );
 
-        if let Some(translator) = &self.translator {
-            self.coordinator.tick(
-                &self.model,
-                &mut self.slots_runtime,
-                &self.capture,
-                &self.windows_ocr,
-                translator,
-                &self.translation_cache,
-                &self.text_translation_cache,
-            );
-        }
+        self.coordinator.tick(
+            &self.model,
+            &mut self.slots_runtime,
+            &self.capture,
+            &self.windows_ocr,
+            &self.paddle_ocr,
+            self.settings.ocr_engine,
+            &self.translator,
+            &self.translation_cache,
+            &self.text_translation_cache,
+        );
     }
 
     fn ui_settings(&mut self, ctx: &egui::Context) {

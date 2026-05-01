@@ -40,5 +40,15 @@ pub trait Translator: Send + Sync {
         source: Option<&LanguageTag>,
         target: &LanguageTag,
     ) -> Result<String>;
+
+    /// Optional: Translate directly from an image frame (Vision mode)
+    fn translate_frame(
+        &self,
+        _frame: &FrameRgba,
+        _source: Option<&LanguageTag>,
+        _target: &LanguageTag,
+    ) -> Result<String> {
+        anyhow::bail!("Vision translation not supported by this provider")
+    }
 }
 

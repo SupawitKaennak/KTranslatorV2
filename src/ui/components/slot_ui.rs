@@ -168,7 +168,7 @@ pub fn render_slot_item(
                 let slot = &mut model.slots[slot_idx];
 
                 if slot.rect.is_none() {
-                    slot.rect = Some(Rect { x: 0, y: 0, w: 400, h: 200 });
+                    slot.rect = Some(Rect { x: 0.0, y: 0.0, w: 400.0, h: 200.0 });
                 }
                 if let Some(r) = slot.rect.as_mut() {
                     ui.horizontal(|ui| {

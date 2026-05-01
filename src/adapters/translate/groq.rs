@@ -68,10 +68,13 @@ impl Translator for GroqTranslator {
 
         let system_prompt = if multi_line {
             format!(
-                "You are a professional translator. CRITICAL: Translate each numbered line into {}. \
+                "You are a professional manga/game translator. CRITICAL: Translate each numbered line into {}. \
                  You MUST return EXACTLY the same number of lines as provided. \
-                 Keep the same numbering (N. <translation>). Do NOT skip or merge lines. \
-                 Output ONLY the translated numbered list, no extra text.",
+                 Each output line must start with its corresponding number (N. <translation>). \
+                 Output ONLY the translation in the target language. \
+                 Do NOT include the original Japanese or English text. Do NOT include explanations. \
+                 If the target is Thai, output ONLY Thai. \
+                 Maintain 1-to-1 mapping. No extra text.",
                 target_name
             )
         } else {

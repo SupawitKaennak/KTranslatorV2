@@ -56,10 +56,10 @@ impl FrameSource for ScreenshotsCapture {
         
         // Rect.x and Rect.y are absolute desktop coordinates.
         // Convert to relative coordinates for the crop.
-        let rel_x = (rect.x - screen.display_info.x).max(0) as u32;
-        let rel_y = (rect.y - screen.display_info.y).max(0) as u32;
-        let crop_w = rect.w.max(1) as u32;
-        let crop_h = rect.h.max(1) as u32;
+        let rel_x = (rect.x - screen.display_info.x as f32).max(0.0) as u32;
+        let rel_y = (rect.y - screen.display_info.y as f32).max(0.0) as u32;
+        let crop_w = rect.w.max(1.0) as u32;
+        let crop_h = rect.h.max(1.0) as u32;
 
         // Ensure crop is within bounds
         let img_w = full_img.width();
