@@ -23,9 +23,16 @@ struct PaddleRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum PaddleData {
+    Items(Vec<PaddleItem>),
+    String(String),
+}
+
+#[derive(Debug, Deserialize)]
 struct PaddleResponse {
     code: i32,
-    data: Option<Vec<PaddleItem>>,
+    data: Option<PaddleData>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -69,6 +76,15 @@ impl PaddleOcr {
             *proc_guard = Some(child);
         }
         Ok(())
+    }
+}
+
+impl Drop for PaddleOcr {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.process.lock().take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
 }
 
@@ -124,7 +140,7 @@ impl OcrEngine for PaddleOcr {
         }
 
         let mut out = Vec::new();
-        if let Some(data) = resp.data {
+        if let Some(PaddleData::Items(data)) = resp.data {
             for item in data {
                 // PaddleOCR returns 4 points. We use min/max for the rect.
                 let min_x = item.points.iter().map(|p| p[0]).min().unwrap_or(0);

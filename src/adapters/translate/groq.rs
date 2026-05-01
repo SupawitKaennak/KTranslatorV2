@@ -14,7 +14,9 @@ pub struct GroqTranslator {
 impl GroqTranslator {
     pub fn new(api_key: String, model: String) -> Result<Self> {
         let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(20))
+            .timeout(std::time::Duration::from_secs(30))
+            .tcp_keepalive(std::time::Duration::from_secs(60))
+            .pool_idle_timeout(std::time::Duration::from_secs(120))
             .build()
             .context("build http client")?;
         Ok(Self {
