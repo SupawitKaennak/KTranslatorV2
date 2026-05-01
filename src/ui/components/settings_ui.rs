@@ -64,6 +64,30 @@ pub fn show_settings_window(
                 });
                 ui.separator();
 
+                ui.horizontal(|ui| {
+                    ui.label("OCR Engine:");
+                    ui.selectable_value(
+                        &mut settings.ocr_engine,
+                        crate::infra::settings::OcrEngineType::Windows,
+                        "Windows OCR (Default)",
+                    );
+                    ui.selectable_value(
+                        &mut settings.ocr_engine,
+                        crate::infra::settings::OcrEngineType::Paddle,
+                        "PaddleOCR (Best for Manga)",
+                    );
+                });
+                
+                if settings.ocr_engine == crate::infra::settings::OcrEngineType::Paddle {
+                    ui.horizontal(|ui| {
+                        ui.label("PaddleOCR-json path:");
+                        ui.add(egui::TextEdit::singleline(&mut settings.paddle_ocr_path).hint_text("C:\\path\\to\\PaddleOCR-json.exe"));
+                    });
+                    ui.small("Download PaddleOCR-json for the best manga recognition results.");
+                }
+
+                ui.separator();
+
                 match settings.provider {
                     TranslationProvider::Gemini => {
                         ui.label("Gemini (API key)");

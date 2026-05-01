@@ -57,6 +57,8 @@ pub struct App {
 
     /// Local OCR engine (Offline)
     windows_ocr: Arc<WindowsOcr>,
+    /// Advanced Local OCR engine (Paddle)
+    paddle_ocr: Arc<crate::adapters::ocr::paddle_ocr::PaddleOcr>,
 
     /// Text-only translator via selected provider (Gemini/Groq/Ollama)
     translator: Option<Arc<dyn Translator + Send + Sync>>,
@@ -177,6 +179,8 @@ impl App {
 
         let coordinator = BackgroundCoordinator::new();
 
+        let paddle_ocr = Arc::new(crate::adapters::ocr::paddle_ocr::PaddleOcr::new(settings.paddle_ocr_path.clone()));
+
         Self {
             model: Arc::new(Mutex::new(AppModel::new_default())),
             settings,
@@ -189,6 +193,7 @@ impl App {
             crop_finish: Arc::new(Mutex::new(None)),
             capture: Arc::new(ScreenshotsCapture::new()),
             windows_ocr: Arc::new(WindowsOcr::new()),
+            paddle_ocr,
             translator,
             coordinator,
             slots_runtime: vec![SlotRuntimeState::new()],
@@ -543,17 +548,17 @@ impl App {
             &self.translation_cache,
         );
 
-        if let Some(translator) = &self.translator {
-            self.coordinator.tick(
-                &self.model,
-                &mut self.slots_runtime,
-                &self.capture,
-                &self.windows_ocr,
-                translator,
-                &self.translation_cache,
-                &self.text_translation_cache,
-            );
-        }
+        self.coordinator.tick(
+            &self.model,
+            &mut self.slots_runtime,
+            &self.capture,
+            &self.windows_ocr,
+            &self.paddle_ocr,
+            self.settings.ocr_engine,
+            &self.translator,
+            &self.translation_cache,
+            &self.text_translation_cache,
+        );
     }
 
     fn ui_settings(&mut self, ctx: &egui::Context) {

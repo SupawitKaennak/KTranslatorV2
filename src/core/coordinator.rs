@@ -1,9 +1,10 @@
 use std::sync::{mpsc, Arc};
 use std::collections::HashMap;
+use anyhow::Context;
 use parking_lot::Mutex;
 use crate::core::{
     model::AppModel,
-    ports::{FrameSource, Translator},
+    ports::{FrameSource, Translator, OcrEngine},
     worker::{BgResult, SlotRuntimeState, smart_hash},
     text_cleaner::TextCleaner,
 };
@@ -207,7 +208,9 @@ impl BackgroundCoordinator {
         slots_runtime: &mut Vec<SlotRuntimeState>,
         capture: &Arc<dyn FrameSource>,
         windows_ocr: &Arc<WindowsOcr>,
-        translator: &Arc<dyn Translator + Send + Sync>,
+        paddle_ocr: &Arc<crate::adapters::ocr::paddle_ocr::PaddleOcr>,
+        ocr_engine_type: crate::infra::settings::OcrEngineType,
+        translator: &Option<Arc<dyn Translator + Send + Sync>>,
         translation_cache: &Arc<Mutex<HashMap<(u64, Option<String>, String), (String, String)>>>,
         text_translation_cache: &Arc<Mutex<HashMap<(u64, Option<String>, String), String>>>,
     ) {
@@ -265,6 +268,8 @@ impl BackgroundCoordinator {
             let target_lang = slot.target_lang.clone();
             let capture = capture.clone();
             let windows_ocr = windows_ocr.clone();
+            let paddle_ocr = paddle_ocr.clone();
+            let ocr_engine_type = ocr_engine_type;
             let translator = translator.clone();
             let tx = self.bg_tx.clone();
             let prev_hash = slots_runtime[i].last_hash;
@@ -305,7 +310,10 @@ impl BackgroundCoordinator {
                         }
 
                         let _ = tx_inner.send(BgResult::StatusUpdate { slot_idx: i, status: "OCR...".to_string() });
-                        let ocr_lines = windows_ocr.recognize_lines(&frame, source_lang.as_ref())?;
+                        let ocr_lines = match ocr_engine_type {
+                            crate::infra::settings::OcrEngineType::Windows => windows_ocr.recognize_lines(&frame, source_lang.as_ref())?,
+                            crate::infra::settings::OcrEngineType::Paddle => paddle_ocr.recognize_lines(&frame, source_lang.as_ref())?,
+                        };
                         
                         // --- Grouping disabled as it caused UI chaos and AI confusion ---
                         // let ocr_lines = Self::group_ocr_lines(raw_ocr_lines);
@@ -361,7 +369,9 @@ impl BackgroundCoordinator {
                         }
 
                         let _ = tx_inner.send(BgResult::StatusUpdate { slot_idx: i, status: "Translating (AI)...".to_string() });
-                        let translated = translator.translate(&ocr_text, source_lang.as_ref(), &target_lang)?;
+                        let translated = translator.as_ref()
+                            .context("No translator provider selected")?
+                            .translate(&ocr_text, source_lang.as_ref(), &target_lang)?;
 
                         {
                             let text_hash = {

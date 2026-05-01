@@ -52,9 +52,15 @@ impl WindowsOcr {
         };
 
         let dynamic = image::DynamicImage::ImageRgba8(img);
-        let sharpened = dynamic.unsharpen(1.0, 15);
+        
+        // 1. Denoise: A very light blur to merge screentone dots
+        let blurred = dynamic.blur(0.5);
+        
+        // 2. Sharpen: Bring back character edges
+        let sharpened = blurred.unsharpen(1.5, 10);
+        
         let gray_img = sharpened.to_luma8();
-
+ 
         let (processed_img, final_scale) = if frame.height < 1200 {
             let scale = 3.0;
             let new_w = (frame.width as f32 * scale) as u32;
@@ -68,8 +74,7 @@ impl WindowsOcr {
 
         let mut final_img: image::ImageBuffer<image::Luma<u8>, Vec<u8>> = processed_img;
         
-        // Dynamic Contrast Stretching instead of hard thresholding
-        // This is much safer for manga with screentones/grey backgrounds.
+        // 3. Dynamic Contrast Stretching
         let mut min_v = 255u8;
         let mut max_v = 0u8;
         for pixel in final_img.pixels() {
@@ -84,6 +89,19 @@ impl WindowsOcr {
                 let v = pixel.0[0];
                 let normalized = ((v - min_v) as f32 / range * 255.0) as u8;
                 pixel.0[0] = normalized;
+            }
+        }
+
+        // 4. Auto-Inversion: Manga text can be white-on-black.
+        // If the image is mostly dark, invert it for Windows OCR.
+        let mut dark_pixels = 0;
+        let total = final_img.width() * final_img.height();
+        for pixel in final_img.pixels() {
+            if pixel.0[0] < 128 { dark_pixels += 1; }
+        }
+        if dark_pixels > total / 2 {
+            for pixel in final_img.pixels_mut() {
+                pixel.0[0] = 255 - pixel.0[0];
             }
         }
 
