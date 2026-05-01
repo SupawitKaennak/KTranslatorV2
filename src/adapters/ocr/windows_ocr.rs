@@ -1,8 +1,5 @@
 use anyhow::{Context, Result};
 use image::{ImageBuffer, Rgba};
-use std::collections::HashMap;
-use parking_lot::Mutex;
-use std::sync::Arc;
 use windows::Graphics::Imaging::SoftwareBitmap;
 use windows::Media::Ocr::OcrEngine;
 use windows::Storage::Streams::DataWriter;
@@ -10,15 +7,11 @@ use windows::Storage::Streams::DataWriter;
 use crate::core::types::LanguageTag;
 use crate::core::ports::{FrameRgba, OcrTextLine};
 
-pub struct WindowsOcr {
-    engines: Arc<Mutex<HashMap<String, OcrEngine>>>,
-}
+pub struct WindowsOcr {}
 
 impl WindowsOcr {
     pub fn new() -> Self {
-        Self {
-            engines: Arc::new(Mutex::new(HashMap::new())),
-        }
+        Self {}
     }
 
     fn make_engine(lang_hint: Option<&LanguageTag>) -> Result<OcrEngine> {
@@ -51,21 +44,26 @@ impl WindowsOcr {
             return (frame.clone(), 1.0);
         };
 
-        let dynamic = image::DynamicImage::ImageRgba8(img);
+        // Convert to grayscale first. This reduces the math required for blur and unsharpen by 75%
+        // because it operates on 1 channel (Luma) instead of 4 (RGBA).
+        let gray_img_base = image::DynamicImage::ImageRgba8(img).into_luma8();
+        let gray_dynamic = image::DynamicImage::ImageLuma8(gray_img_base);
         
         // 1. Denoise: A very light blur to merge screentone dots
-        let blurred = dynamic.blur(0.5);
+        let blurred = gray_dynamic.blur(0.5);
         
         // 2. Sharpen: Bring back character edges
         let sharpened = blurred.unsharpen(1.5, 10);
         
-        let gray_img = sharpened.to_luma8();
+        let gray_img = sharpened.into_luma8();
  
         let (processed_img, final_scale) = if frame.height < 1200 {
             let scale = 3.0;
             let new_w = (frame.width as f32 * scale) as u32;
             let new_h = (frame.height as f32 * scale) as u32;
-            let resized = image::imageops::resize(&gray_img, new_w, new_h, image::imageops::FilterType::CatmullRom);
+            // Use Triangle (Bilinear) instead of CatmullRom.
+            // Triangle is significantly faster and sufficient for OCR text upscaling.
+            let resized = image::imageops::resize(&gray_img, new_w, new_h, image::imageops::FilterType::Triangle);
             (resized, scale)
         } else {
             (gray_img, 1.0)
@@ -122,17 +120,7 @@ impl WindowsOcr {
         frame: &FrameRgba,
         lang_hint: Option<&LanguageTag>,
     ) -> Result<Vec<OcrTextLine>> {
-        let lang_key = lang_hint
-            .map(|l| l.0.clone())
-            .unwrap_or_else(|| "default".to_string());
-
-        let engine = {
-            let mut cache = self.engines.lock();
-            if !cache.contains_key(&lang_key) {
-                cache.insert(lang_key.clone(), Self::make_engine(lang_hint)?);
-            }
-            cache.get(&lang_key).unwrap().clone()
-        };
+        let engine = Self::make_engine(lang_hint)?;
 
         let (processed_frame, scale) = Self::preprocess(frame);
         let bitmap = Self::to_software_bitmap(&processed_frame)?;

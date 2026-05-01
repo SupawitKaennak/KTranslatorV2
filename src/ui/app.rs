@@ -550,7 +550,7 @@ impl App {
 
 
 
-    fn tick_background(&mut self) {
+    fn tick_background(&mut self, ctx: &egui::Context) {
         // 1. Process pending signals from popups/error window
         while let Ok(_) = self.error_dismiss_rx.try_recv() {
             self.last_errors.clear();
@@ -574,6 +574,7 @@ impl App {
             &self.translator,
             &self.translation_cache,
             &self.text_translation_cache,
+            ctx.clone(),
         );
     }
 
@@ -682,11 +683,7 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Force continuous refresh so background translation results are picked up immediately
-        // even when the main window is not focused.
-        ctx.request_repaint();
-
-        self.tick_background();
+        self.tick_background(ctx);
         self.ui_error_popup(ctx);
 
         if let Some(sess) = &self.crop_session {
@@ -846,6 +843,20 @@ impl eframe::App for App {
         self.ui_popups(ctx);
         self.ui_frames(ctx);
 
-        ctx.request_repaint_after(std::time::Duration::from_millis(33));
+        let mut min_wait_ms = u64::MAX;
+        if self.model.lock().running {
+            let now = BackgroundCoordinator::now_ms();
+            let m = self.model.lock();
+            for (i, slot) in m.slots.iter().enumerate() {
+                if slot.enabled && slot.rect.is_some() && !self.slots_runtime[i].busy {
+                    let wait = slot.next_tick_at_ms.saturating_sub(now);
+                    min_wait_ms = min_wait_ms.min(wait);
+                }
+            }
+        }
+
+        if min_wait_ms != u64::MAX {
+            ctx.request_repaint_after(std::time::Duration::from_millis(min_wait_ms.max(5)));
+        }
     }
 }

@@ -15,12 +15,14 @@ use crate::adapters::{
 pub struct BackgroundCoordinator {
     pub bg_tx: mpsc::Sender<BgResult>,
     pub bg_rx: mpsc::Receiver<BgResult>,
+    pool: threadpool::ThreadPool,
 }
 
 impl BackgroundCoordinator {
     pub fn new() -> Self {
         let (bg_tx, bg_rx) = mpsc::channel();
-        Self { bg_tx, bg_rx }
+        let pool = threadpool::ThreadPool::new(4); // 4 persistent worker threads
+        Self { bg_tx, bg_rx, pool }
     }
 
     pub fn now_ms() -> u64 {
@@ -213,6 +215,7 @@ impl BackgroundCoordinator {
         translator: &Option<Arc<dyn Translator + Send + Sync>>,
         translation_cache: &Arc<Mutex<HashMap<(u64, Option<String>, String), (String, String)>>>,
         text_translation_cache: &Arc<Mutex<HashMap<(u64, Option<String>, String), String>>>,
+        ctx: egui::Context,
     ) {
         let now = Self::now_ms();
         let snapshot = { model_arc.lock().clone() };
@@ -280,14 +283,18 @@ impl BackgroundCoordinator {
             let text_cache_arc = text_translation_cache.clone();
             let first_unstable_at = slots_runtime[i].first_unstable_at;
 
-            std::thread::spawn(move || {
+            let ctx_worker = ctx.clone();
+            self.pool.execute(move || {
                 let _ = tx.send(BgResult::StatusUpdate { slot_idx: i, status: "Capturing...".to_string() });
+                ctx_worker.request_repaint();
                 let tx_for_panic = tx.clone();
+                let ctx_for_panic = ctx_worker.clone();
                 let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
                     let tx_inner = tx.clone();
                     let result = (|| -> anyhow::Result<BgResult> {
                         let frame = capture.capture_rect(rect, display_id)?;
                         let _ = tx_inner.send(BgResult::StatusUpdate { slot_idx: i, status: "Hashing...".to_string() });
+                        ctx_worker.request_repaint();
                         let hash = smart_hash(&frame.data);
                         let now = Self::now_ms();
 
@@ -310,6 +317,7 @@ impl BackgroundCoordinator {
                         }
 
                         let _ = tx_inner.send(BgResult::StatusUpdate { slot_idx: i, status: "OCR...".to_string() });
+                        ctx_worker.request_repaint();
                         let ocr_lines = match ocr_engine_type {
                             crate::infra::settings::OcrEngineType::Windows => windows_ocr.recognize_lines(&frame, source_lang.as_ref())?,
                             crate::infra::settings::OcrEngineType::Paddle => paddle_ocr.recognize_lines(&frame, source_lang.as_ref())?,
@@ -369,6 +377,7 @@ impl BackgroundCoordinator {
                         }
 
                         let _ = tx_inner.send(BgResult::StatusUpdate { slot_idx: i, status: "Translating (AI)...".to_string() });
+                        ctx_worker.request_repaint();
                         let translated = translator.as_ref()
                             .context("No translator provider selected")?
                             .translate(&ocr_text, source_lang.as_ref(), &target_lang)?;
@@ -390,9 +399,13 @@ impl BackgroundCoordinator {
                     })();
 
                     match result {
-                        Ok(res) => { let _ = tx.send(res); }
+                        Ok(res) => { 
+                            let _ = tx.send(res); 
+                            ctx_worker.request_repaint();
+                        }
                         Err(e) => {
                             let _ = tx.send(BgResult::Error { slot_idx: i, language_version, err: format!("{e:#}") });
+                            ctx_worker.request_repaint();
                         }
                     }
                 }));
@@ -401,6 +414,7 @@ impl BackgroundCoordinator {
                     let _ = tx_for_panic.send(BgResult::Error {
                         slot_idx: i, language_version, err: "Background thread panicked (system error)".to_string(),
                     });
+                    ctx_for_panic.request_repaint();
                 }
             });
         }
