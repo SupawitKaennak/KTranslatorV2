@@ -336,6 +336,7 @@ impl App {
             }
             // Clone the Arc so the closure can own it without needing &mut self
             let hwnd_cache = self.slots_runtime[slot_id].overlay_hwnd.clone();
+            let overlay_settings = self.settings.clone();
 
             ctx.show_viewport_immediate(
                 viewport_id,
@@ -372,6 +373,21 @@ impl App {
                             drop(m);
 
                             if show_overlay {
+                                let overlay_bg_color = egui::Color32::from_rgba_unmultiplied(
+                                    overlay_settings.overlay_bg_color[0],
+                                    overlay_settings.overlay_bg_color[1],
+                                    overlay_settings.overlay_bg_color[2],
+                                    overlay_settings.overlay_bg_color[3],
+                                );
+                                let overlay_text_color = egui::Color32::from_rgba_unmultiplied(
+                                    overlay_settings.overlay_text_color[0],
+                                    overlay_settings.overlay_text_color[1],
+                                    overlay_settings.overlay_text_color[2],
+                                    overlay_settings.overlay_text_color[3],
+                                );
+                                let overlay_padding = overlay_settings.overlay_padding;
+                                let overlay_corner_radius = overlay_settings.overlay_corner_radius;
+
                                 // ── Positional overlay ────────────────────────────────────────
                                 // Background is TRANSPARENT. Only the small dark rect behind
                                 // each translated line is drawn, matching the original text position.
@@ -391,9 +407,9 @@ impl App {
                                             .unwrap_or("");
                                         if trans.trim().is_empty() { continue; }
 
-                                        // Font size: Capped strictly at 18px for better manga feel
-                                        let base_h = if ocr_line.h > 40.0 { 24.0 } else { ocr_line.h };
-                                        let font_size = (base_h as f32 * 0.80 / ppp).clamp(11.0, 18.0);
+                                        // Font size: Use user setting, but cap at 120% of original line height if needed
+                                        let line_h_points = ocr_line.h / ppp;
+                                        let font_size = overlay_settings.overlay_font_size.min(line_h_points * 1.2).max(8.0);
 
                                         // Wrap text within region width
                                         let wrap_width = (max_text_w - (ocr_line.x as f32 / ppp) + full_rect.left()).max(100.0);
@@ -401,7 +417,7 @@ impl App {
                                             f.layout(
                                                 trans.to_string(),
                                                 egui::FontId::proportional(font_size),
-                                                egui::Color32::WHITE,
+                                                overlay_text_color,
                                                 wrap_width,
                                             )
                                         });
@@ -409,27 +425,27 @@ impl App {
                                         let start_y = ocr_line.y / ppp;
 
                                         // Background covers the ENTIRE OCR line area to fully hide original text
-                                        let bg_w = (ocr_line.w / ppp).max(galley.size().x + 10.0).min(wrap_width + 10.0);
-                                        let bg_h = (ocr_line.h / ppp).max(galley.size().y + 4.0);
+                                        let bg_w = (ocr_line.w / ppp).max(galley.size().x + (overlay_padding * 2.0)).min(wrap_width + (overlay_padding * 2.0));
+                                        let bg_h = (ocr_line.h / ppp).max(galley.size().y + overlay_padding);
                                         let bg = egui::Rect::from_min_size(
-                                            egui::pos2((ocr_line.x / ppp) - 2.0, start_y - 1.0),
-                                            egui::vec2(bg_w + 4.0, bg_h + 2.0),
+                                            egui::pos2((ocr_line.x / ppp) - overlay_padding/2.0, start_y - overlay_padding/4.0),
+                                            egui::vec2(bg_w + overlay_padding, bg_h + overlay_padding/2.0),
                                         );
                                         
                                         // Update last_bottom_y for the next iteration
                                         last_bottom_y = bg.max.y;
 
-                                        // Fully opaque dark background — NOT pure black (color-keyed)
+                                        // Use user's background color
                                         painter.rect_filled(
                                             bg,
-                                            3.0,
-                                            egui::Color32::from_rgba_unmultiplied(18, 18, 30, 255),
+                                            overlay_corner_radius,
+                                            overlay_bg_color,
                                         );
 
                                         // Center text vertically within the calculated background box
                                         let text_y = start_y + (bg_h - galley.size().y) / 2.0;
                                         let text_pos = egui::pos2(ocr_line.x / ppp, text_y);
-                                        painter.galley(text_pos, galley, egui::Color32::WHITE);
+                                        painter.galley(text_pos, galley, overlay_text_color);
                                     }
 
                                     // Render any extra translated lines below everything else
@@ -442,25 +458,25 @@ impl App {
                                             let galley = ctx.fonts(|f| {
                                                 f.layout(
                                                     extra.clone(),
-                                                    egui::FontId::proportional(14.0),
-                                                    egui::Color32::WHITE,
+                                                    egui::FontId::proportional(overlay_settings.overlay_font_size),
+                                                    overlay_text_color,
                                                     wrap_width,
                                                 )
                                             });
                                             let pos = egui::pos2(last.x as f32 / ppp, y);
                                             let bg = egui::Rect::from_min_size(
-                                                pos - egui::vec2(5.0, 3.0),
-                                                galley.size() + egui::vec2(10.0, 6.0),
+                                                pos - egui::vec2(overlay_padding, overlay_padding/2.0),
+                                                galley.size() + egui::vec2(overlay_padding*2.0, overlay_padding),
                                             );
-                                            painter.rect_filled(bg, 3.0, egui::Color32::from_rgba_unmultiplied(18, 18, 30, 255));
+                                            painter.rect_filled(bg, overlay_corner_radius, overlay_bg_color);
                                             let line_h = galley.size().y;
-                                            painter.galley(pos, galley, egui::Color32::WHITE);
+                                            painter.galley(pos, galley, overlay_text_color);
                                             y += line_h + 4.0;
                                         }
                                     }
                                 } else {
                                     // Fallback: no position info (cache hit) — stack lines vertically centered
-                                    let font_size = 16.0_f32;
+                                    let font_size = overlay_settings.overlay_font_size;
                                     let mut y = full_rect.top() + 8.0;
                                     for line in fallback_text.lines() {
                                         if line.trim().is_empty() { continue; }
@@ -469,7 +485,7 @@ impl App {
                                             f.layout(
                                                 line.to_string(),
                                                 egui::FontId::proportional(font_size),
-                                                egui::Color32::WHITE,
+                                                overlay_text_color,
                                                 wrap_width,
                                             )
                                         });
@@ -477,12 +493,12 @@ impl App {
                                             .clamp(full_rect.left() + 4.0, full_rect.right() - 4.0);
                                         let pos = egui::pos2(x, y);
                                         let bg = egui::Rect::from_min_size(
-                                            pos - egui::vec2(5.0, 3.0),
-                                            galley.size() + egui::vec2(10.0, 6.0),
+                                            pos - egui::vec2(overlay_padding, overlay_padding/2.0),
+                                            galley.size() + egui::vec2(overlay_padding*2.0, overlay_padding),
                                         );
-                                        painter.rect_filled(bg, 3.0, egui::Color32::from_rgba_unmultiplied(18, 18, 30, 255));
+                                        painter.rect_filled(bg, overlay_corner_radius, overlay_bg_color);
                                         let line_h = galley.size().y;
-                                        painter.galley(pos, galley, egui::Color32::WHITE);
+                                        painter.galley(pos, galley, overlay_text_color);
                                         y += line_h + 4.0;
                                     }
                                 }
