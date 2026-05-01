@@ -1,66 +1,58 @@
 # KTranslator V2
 
-โปรแกรมแปลภาษาบนหน้าจอประสิทธิภาพสูง เขียนด้วยภาษา Rust รองรับการแปลแบบ Real-time พร้อมระบบ Overlay 
+โปรแกรมแปลภาษาจากการจับภาพหน้าจอ (Screen Translator) เขียนด้วยภาษา Rust 
 
-<img width="559" height="333" alt="{C93780CF-C104-4925-8ECD-1726E73F654D}" src="https://github.com/user-attachments/assets/6855e97f-9d64-4574-a113-ede638fd1443" /><br>
-<img width="562" height="332" alt="{A77DBB38-1A99-4DB6-A647-D0B3F0C39459}" src="https://github.com/user-attachments/assets/2efd1545-468b-4e9b-9f83-df0c20280ae4" />
-
-## ความสามารถเด่น (Features)
-
-- **Real-time Translation:** จับภาพและแปลภาษาบนหน้าจอได้ทันที
-- **Dual OCR Engine:**
-  - **Windows OCR:** รวดเร็ว กินทรัพยากรน้อย เหมาะสำหรับบทความทั่วไป
-  - **PaddleOCR:** แม่นยำสูงสุดสำหรับมังงะ รองรับฟอนต์เอียง/โค้ง/มน ได้ดีเยี่ยม (ต้องการโปรแกรมเสริม)
-- **Multi-Provider Support:**
-  - **Gemini:** AI ทรงพลังจาก Google แปลลื่นไหลเหมือนมนุษย์
-  - **Groq:** แปลไวที่สุดในโลก รองรับ Llama 3.3 70B
-  - **Ollama:** แปลแบบ Offline 100% ฟรีและเป็นส่วนตัว
-- **Positional Overlay:** แสดงคำแปลทับตัวอักษรเดิมบนหน้าจอโดยตรง พร้อมรักษาตำแหน่งเดิมไว้
-- **Exclusion Capture:** ระบบซ่อนหน้าต่างโปรแกรมตัวเองขณะจับภาพ เพื่อไม่ให้เกิดภาพซ้อน
+### 🎯 ลักษณะการใช้งาน
+- **แปลเกม:** ใช้แปลบทสนทนาหรือเมนูในเกม
+- **แปลมังงะ:** อ่านข้อความจากภาพมังงะหรือคอมมิค (รองรับตัวหนังสือเอียง/โค้ง)
+- **แปลบทความ:** แปลข้อความจากหน้าเว็บ เอกสาร หรือ PDF ที่ไม่สามารถก๊อปปี้ข้อความได้
 
 ---
 
-## ความต้องการของระบบ (Requirements)
+### 🛠️ ความต้องการของระบบ (Requirements)
 
-เพื่อให้โปรแกรมทำงานได้สมบูรณ์ คุณต้องติดตั้งสิ่งเหล่านี้:
+**1. ระบบ OCR (ตัวอ่านข้อความ)**
+- **Windows OCR:** (ติดมากับ Windows) ต้องติดตั้ง Language Pack ของภาษาต้นทางที่จะแปลให้เรียบร้อย (เช่น ญี่ปุ่น, จีน)
+- **PaddleOCR:** (แนะนำสำหรับมังงะ) ต้องดาวน์โหลดตัวโปรแกรม [PaddleOCR-json](https://github.com/hiroi-sora/PaddleOCR-json/releases) และระบุที่อยู่ไฟล์ `.exe` ในหน้า Settings ของโปรแกรม
 
-### 1. ภาษาและ OCR (จำเป็น)
-- **Windows Language Packs:** หากใช้ Windows OCR ต้องติดตั้ง Language Pack ของภาษาที่จะแปล **ต้นทาง** (เช่น ญี่ปุ่น, จีน) โดยต้องเลือกติ๊กถูกที่ **"Optical Character Recognition"** ตอนติดตั้งด้วย
-- **PaddleOCR-json (แนะนำสำหรับมังงะ):**
-  - ดาวน์โหลดจาก: [hiroi-sora/PaddleOCR-json](https://github.com/hiroi-sora/PaddleOCR-json/releases)
-  - แตกไฟล์ไว้ในเครื่อง และนำ Path ของไฟล์ `.exe` ไปใส่ในหน้า Settings ของ KTranslator
-
-### 2. ตัวแปลภาษา (เลือกอย่างใดอย่างหนึ่ง)
-- **Cloud API (แนะนำ):**
-  - [Google AI Studio](https://aistudio.google.com/) สำหรับรับ API Key ของ Gemini (ฟรี)
-  - [Groq Console](https://console.groq.com/) สำหรับรับ API Key ของ Groq (ฟรีและเร็วมาก)
-- **Local LLM (แปลออฟไลน์):**
-  - [Ollama](https://ollama.com/) ติดตั้งและรันโมเดล (เช่น `ollama pull qwen2.5:1.5b`)
-
-### 3. สำหรับนักพัฒนา (Build from Source)
-- **Rust Toolchain:** [ติดตั้ง Rust](https://rustup.rs/)
+**2. ระบบการแปล (Translator)**
+- **Gemini:** ต้องใช้ API Key สมัครฟรีได้ที่ [Google AI Studio](https://aistudio.google.com/)
+- **Groq:** ต้องใช้ API Key สมัครฟรีได้ที่ [Groq Console](https://console.groq.com/)
+- **Ollama:** สำหรับการแปลแบบ Offline ดาวน์โหลดได้ที่ [Ollama.com](https://ollama.com/)
 
 ---
 
-## วิธีการใช้งาน
-
-1. **ตั้งค่า OCR:** เข้าไปที่ฟันเฟือง (Settings) เลือก OCR Engine ที่ต้องการ
-   - หากใช้ PaddleOCR ให้ระบุที่อยู่ไฟล์ `.exe` ให้ถูกต้อง
-2. **ตั้งค่า Translator:** ใส่ API Key ของ Gemini หรือ Groq หรือตั้งค่า URL ของ Ollama
-3. **เพิ่มพื้นที่แปล:** กดปุ่ม **➕ Add Region** และเลือกพื้นที่บนหน้าจอที่ต้องการแปล
-4. **เริ่มการทำงาน:** กดปุ่ม **▶ Start**
-5. **Overlay Mode:** เปิดโหมดนี้เพื่อระบายสีทับตัวอักษรเดิมและแสดงคำแปลทับลงไป
+### 💻 เทคโนโลยีที่ใช้ (Tech Stack)
+- **Language:** Rust (edition 2024)
+- **UI Framework:** [egui](https://github.com/emilk/egui)
+- **OCR Engines:** Windows.Media.Ocr & PaddleOCR
+- **Graphics:** Win32 API (สำหรับระบบ Overlay โปร่งใส)
+- **Capture:** Screenshots crate พร้อมระบบ stabilization
 
 ---
 
-## การแก้ปัญหาเบื้องต้น (Troubleshooting)
+### 🚀 การติดตั้งและใช้งาน
 
-- **Access is denied (os error 5):** ตรวจสอบว่าในช่อง PaddleOCR Path คุณระบุถึงตัวไฟล์ `.exe` หรือยัง (ต้องไม่ใช่แค่ชื่อโฟลเดอร์)
-- **แปลไม่ออก/ตัวหนังสือเพี้ยน:** หากใช้ Windows OCR ให้ตรวจสอบว่าลง Language Pack ครบถ้วนหรือไม่ หากเป็นมังงะแนะนำให้เปลี่ยนไปใช้ PaddleOCR
-- **หน้าจอขาว/ค้างตอนเริ่ม:** ครั้งแรกที่ใช้ PaddleOCR ระบบอาจใช้เวลาโหลดโมเดลครู่หนึ่ง
+**วิธีติดตั้ง (สำหรับนักพัฒนา):**
+1. ติดตั้ง [Rust Toolchain](https://rustup.rs/)
+2. Clone โปรเจกต์:
+   ```bash
+   git clone https://github.com/SupawitKaennak/KTranslatorV2.git
+   cd KTranslatorV2
+   ```
+3. รันโปรแกรม:
+   ```bash
+   cargo run --release
+   ```
+
+**ขั้นตอนการใช้งาน:**
+1. เข้าไปที่ **Settings** (ไอคอนฟันเฟือง) เพื่อเลือก OCR และใส่ API Key
+2. กด **Add Region** และเลือกพื้นที่บนหน้าจอที่ต้องการแปล
+3. เลือกภาษาต้นทาง (From) และภาษาปลายทาง (To)
+4. กดปุ่ม **Start** เพื่อเริ่มการแปล
+5. เปิดโหมด **Overlay Mode** หากต้องการให้คำแปลแสดงทับตำแหน่งเดิมบนหน้าจอ
 
 ---
 
-## สัญญาอนุญาต (License)
-
-Copyright (c) 2026 Supawit Kaennak [GPL v3.0](LICENSE). All rights reserved.
+### 🛡️ สัญญาอนุญาต (License)
+Copyright (c) 2024 Supawit Kaennak [GPL v3.0](LICENSE). All rights reserved.
