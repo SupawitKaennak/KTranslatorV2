@@ -15,6 +15,8 @@ impl OllamaTranslator {
     pub fn new(url: String, model: String) -> Result<Self> {
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(60)) // Reduced from 300s to avoid long hangs while gaming
+            .tcp_keepalive(std::time::Duration::from_secs(60))
+            .pool_idle_timeout(std::time::Duration::from_secs(120))
             .build()
             .context("build http client")?;
         Ok(Self {
