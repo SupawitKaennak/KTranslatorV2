@@ -42,6 +42,7 @@ pub trait Translator: Send + Sync {
     ) -> Result<String>;
 
     /// Optional: Translate directly from an image frame (Vision mode)
+    #[allow(dead_code)]
     fn translate_frame(
         &self,
         _frame: &FrameRgba,
