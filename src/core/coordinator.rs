@@ -299,14 +299,14 @@ impl BackgroundCoordinator {
                         let now = Self::now_ms();
 
                         // Stability Logic
-                        let is_changing = hash != stable_hash;
-                        let unstable_dur = now.saturating_sub(stable_since_ms);
+                        let is_changing = hash != stable_hash || stable_since_ms == 0;
+                        let unstable_dur = if stable_since_ms == 0 { 0 } else { now.saturating_sub(stable_since_ms) };
                         
                         // If we've been unstable for a long time (e.g. 1.5s), FORCE proceed.
                         let unstable_since_start = if first_unstable_at == 0 { 0 } else { now.saturating_sub(first_unstable_at) };
                         let force_proceed = unstable_since_start > 1500; 
 
-                        if is_changing && !force_proceed && unstable_dur < 500 {
+                        if is_changing && !force_proceed {
                             return Ok(BgResult::HashChanged { slot_idx: i, new_hash: hash });
                         }
                         if !force_proceed && unstable_dur < 400 {
