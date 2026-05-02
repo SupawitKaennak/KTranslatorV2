@@ -24,6 +24,7 @@
 - **Gemini:** ต้องใช้ API Key สมัครฟรีได้ที่ [Google AI Studio](https://aistudio.google.com/)
 - **Groq:** ต้องใช้ API Key สมัครฟรีได้ที่ [Groq Console](https://console.groq.com/)
 - **Ollama:** สำหรับการแปลแบบ Offline ดาวน์โหลดได้ที่ [Ollama.com](https://ollama.com/)
+- **Custom OpenAI:** รองรับ API ทุกเจ้าที่ใช้มาตรฐาน OpenAI (เช่น OpenRouter, DeepSeek, LM Studio) พร้อมระบบ **Auto-Fetch** ดึงรายชื่อโมเดลมาให้เลือกอัตโนมัติ
 
 ### เทคโนโลยีที่ใช้ (Tech Stack)
 - **Language:** Rust (edition 2024)
@@ -75,6 +76,7 @@ A powerful Screen Translator written in Rust for seamless real-time translation.
 - **Gemini:** API Key required. Get it for free at [Google AI Studio](https://aistudio.google.com/).
 - **Groq:** High-speed API. Get your key at [Groq Console](https://console.groq.com/).
 - **Ollama:** For local/offline translation. Download at [Ollama.com](https://ollama.com/).
+- **Custom OpenAI:** Supports any OpenAI-compatible API (OpenRouter, DeepSeek, LM Studio) with **Auto-Fetch** model selection support.
 
 ### Tech Stack
 - **Language:** Rust (edition 2024)
