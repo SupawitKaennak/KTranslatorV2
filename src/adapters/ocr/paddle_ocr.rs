@@ -26,7 +26,7 @@ struct PaddleRequest {
 #[serde(untagged)]
 enum PaddleData {
     Items(Vec<PaddleItem>),
-    String(String),
+    String(#[allow(dead_code)] String),
 }
 
 #[derive(Debug, Deserialize)]
