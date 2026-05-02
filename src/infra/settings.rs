@@ -8,6 +8,7 @@ pub enum TranslationProvider {
     Gemini,
     Groq,
     Ollama,
+    CustomOpenAI,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,6 +28,9 @@ pub struct Settings {
     pub groq_model: String,
     pub ollama_url: String,
     pub ollama_model: String,
+    pub custom_openai_url: String,
+    pub custom_openai_api_key: String,
+    pub custom_openai_model: String,
     pub dark_mode: bool,
 
     // Overlay Customization
@@ -49,6 +53,9 @@ impl Default for Settings {
             groq_model: "llama-3.3-70b-versatile".to_string(),
             ollama_url: "http://localhost:11434".to_string(),
             ollama_model: "llama3.2:1b".to_string(),
+            custom_openai_url: "https://api.openai.com/v1".to_string(),
+            custom_openai_api_key: String::new(),
+            custom_openai_model: "gpt-4o-mini".to_string(),
             dark_mode: true,
             overlay_bg_color: [0, 0, 0, 180], // Semi-transparent black
             overlay_text_color: [255, 255, 255, 255], // White

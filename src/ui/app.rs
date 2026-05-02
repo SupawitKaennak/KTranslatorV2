@@ -81,6 +81,11 @@ pub struct App {
     /// Channel to signal error dismissal from the error viewport
     error_dismiss_tx: mpsc::Sender<()>,
     error_dismiss_rx: mpsc::Receiver<()>,
+
+    /// Custom OpenAI compatible models (Auto-fetched)
+    custom_openai_models: Arc<Mutex<Vec<String>>>,
+    custom_openai_fetching: Arc<Mutex<bool>>,
+    custom_openai_error: Arc<Mutex<Option<String>>>,
 }
 
 impl App {
@@ -215,6 +220,9 @@ impl App {
             text_translation_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
             error_dismiss_tx: err_tx,
             error_dismiss_rx: err_rx,
+            custom_openai_models: Arc::new(Mutex::new(Vec::new())),
+            custom_openai_fetching: Arc::new(Mutex::new(false)),
+            custom_openai_error: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -609,7 +617,14 @@ impl App {
         }
         let settings_arc = self.settings_edit.as_ref().unwrap().clone();
         
-        let resp = show_settings_window(ctx, settings_arc.clone(), model_choices);
+        let resp = show_settings_window(
+            ctx, 
+            settings_arc.clone(), 
+            model_choices,
+            self.custom_openai_models.clone(),
+            self.custom_openai_fetching.clone(),
+            self.custom_openai_error.clone(),
+        );
 
         if resp.save_clicked {
             let updated = settings_arc.lock().clone();
