@@ -10,12 +10,25 @@ pub struct SettingsWindowResponse {
     pub close_clicked: bool,
 }
 
+#[derive(serde::Deserialize)]
+struct OpenAiModelsResponse {
+    data: Vec<OpenAiModelItem>,
+}
+
+#[derive(serde::Deserialize)]
+struct OpenAiModelItem {
+    id: String,
+}
+
 /// Renders the settings viewport. 
 /// Returns a response indicating if save or close was requested.
 pub fn show_settings_window(
     ctx: &egui::Context,
     settings_arc: Arc<Mutex<Settings>>,
     model_choices: Vec<GeminiModel>,
+    custom_models: Arc<Mutex<Vec<String>>>,
+    custom_fetching: Arc<Mutex<bool>>,
+    custom_error: Arc<Mutex<Option<String>>>,
 ) -> SettingsWindowResponse {
     let save_flag = Arc::new(AtomicBool::new(false));
     let close_flag = Arc::new(AtomicBool::new(false));
@@ -60,6 +73,11 @@ pub fn show_settings_window(
                         &mut settings.provider,
                         TranslationProvider::Ollama,
                         "Ollama (Offline)",
+                    );
+                    ui.selectable_value(
+                        &mut settings.provider,
+                        TranslationProvider::CustomOpenAI,
+                        "Custom (OpenAI Compatible)",
                     );
                 });
                 ui.separator();
@@ -229,6 +247,109 @@ pub fn show_settings_window(
                             }
                         });
                         ui.small("Make sure Ollama is running before clicking Save & Apply.");
+                    }
+                    TranslationProvider::CustomOpenAI => {
+                        ui.label("Custom API (OpenAI Compatible) — LM Studio, OpenRouter, DeepSeek, etc.");
+                        ui.horizontal(|ui| {
+                            ui.label("Base URL");
+                            ui.text_edit_singleline(&mut settings.custom_openai_url)
+                                .on_hover_text("e.g. http://localhost:1234/v1 or https://openrouter.ai/api/v1");
+                        });
+                        
+                        ui.horizontal(|ui| {
+                            ui.label("Model Name");
+                            
+                            let current_model = settings.custom_openai_model.clone();
+                            let models = custom_models.lock();
+                            let is_fetching = *custom_fetching.lock();
+
+                            if !models.is_empty() {
+                                let mut selected = current_model.clone();
+                                egui::ComboBox::from_id_salt("custom_openai_model_dropdown")
+                                    .width(200.0)
+                                    .selected_text(&selected)
+                                    .show_ui(ui, |ui| {
+                                        for m in models.iter() {
+                                            ui.selectable_value(&mut selected, m.clone(), m);
+                                        }
+                                    });
+                                settings.custom_openai_model = selected;
+                            }
+
+                            ui.add(egui::TextEdit::singleline(&mut settings.custom_openai_model)
+                                .hint_text("Manual entry or select from list"));
+
+                            if is_fetching {
+                                ui.spinner();
+                            } else {
+                                if ui.button("🔄 Fetch").on_hover_text("Try to fetch model list from API").clicked() {
+                                    let url = settings.custom_openai_url.clone();
+                                    let key = settings.custom_openai_api_key.clone();
+                                    let models_arc = custom_models.clone();
+                                    let fetching_arc = custom_fetching.clone();
+                                    let error_arc = custom_error.clone();
+                                    let ctx_clone = ctx.clone();
+
+                                    *custom_fetching.lock() = true;
+                                    *custom_error.lock() = None;
+
+                                    std::thread::spawn(move || {
+                                        let client = reqwest::blocking::Client::builder()
+                                            .timeout(std::time::Duration::from_secs(10))
+                                            .build();
+                                        
+                                        match client {
+                                            Ok(c) => {
+                                                let endpoint = format!("{}/models", url.trim_end_matches('/'));
+                                                let mut req = c.get(&endpoint);
+                                                if !key.trim().is_empty() {
+                                                    req = req.bearer_auth(key.trim());
+                                                }
+                                                
+                                                match req.send() {
+                                                    Ok(resp) => {
+                                                        if resp.status().is_success() {
+                                                            let text = resp.text().unwrap_or_default();
+                                                            match serde_json::from_str::<OpenAiModelsResponse>(&text) {
+                                                                Ok(parsed) => {
+                                                                    let mut m_list = parsed.data.into_iter().map(|i| i.id).collect::<Vec<_>>();
+                                                                    m_list.sort();
+                                                                    *models_arc.lock() = m_list;
+                                                                }
+                                                                Err(e) => {
+                                                                    *error_arc.lock() = Some(format!("Parse error: {e}"));
+                                                                }
+                                                            }
+                                                        } else {
+                                                            *error_arc.lock() = Some(format!("API error: {}", resp.status()));
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        *error_arc.lock() = Some(format!("Network error: {e}"));
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                *error_arc.lock() = Some(format!("Client error: {e}"));
+                                            }
+                                        }
+                                        *fetching_arc.lock() = false;
+                                        ctx_clone.request_repaint();
+                                    });
+                                }
+                            }
+                        });
+
+                        if let Some(err) = custom_error.lock().as_ref() {
+                            ui.colored_label(egui::Color32::RED, format!("⚠ {err}"));
+                        }
+
+                        ui.horizontal(|ui| {
+                            ui.label("API Key (Optional)");
+                            ui.add(egui::TextEdit::singleline(&mut settings.custom_openai_api_key).password(true))
+                                .on_hover_text("Leave blank if connecting to local LM Studio or Ollama");
+                        });
+                        ui.small("The URL should point to the base path, /chat/completions will be appended automatically.");
                     }
                 }
 
